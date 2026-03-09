@@ -35,6 +35,11 @@ def get_model_and_assets():
   return common.read_model('point_mass.xml'), common.ASSETS
 
 
+def get_model_and_assets_3d():
+  """Returns a tuple containing the 3D model XML string and assets."""
+  return common.read_model('point_mass_3d.xml'), common.ASSETS
+
+
 @SUITE.add('benchmarking', 'easy')
 def easy(time_limit=_DEFAULT_TIME_LIMIT, random=None, environment_kwargs=None):
   """Returns the easy point_mass task."""
@@ -50,6 +55,26 @@ def hard(time_limit=_DEFAULT_TIME_LIMIT, random=None, environment_kwargs=None):
   """Returns the hard point_mass task."""
   physics = Physics.from_xml_string(*get_model_and_assets())
   task = PointMass(randomize_gains=True, random=random)
+  environment_kwargs = environment_kwargs or {}
+  return control.Environment(
+      physics, task, time_limit=time_limit, **environment_kwargs)
+
+
+@SUITE.add('easy')
+def easy_3d(time_limit=_DEFAULT_TIME_LIMIT, random=None, environment_kwargs=None):
+  """Returns the easy 3D point_mass task."""
+  physics = Physics.from_xml_string(*get_model_and_assets_3d())
+  task = PointMass3D(random=random)
+  environment_kwargs = environment_kwargs or {}
+  return control.Environment(
+      physics, task, time_limit=time_limit, **environment_kwargs)
+
+
+@SUITE.add('hard')
+def hard_3d(time_limit=_DEFAULT_TIME_LIMIT, random=None, environment_kwargs=None):
+  """Returns the hard 3D point_mass task."""
+  physics = Physics.from_xml_string(*get_model_and_assets_3d())
+  task = PointMass3D(random=random)
   environment_kwargs = environment_kwargs or {}
   return control.Environment(
       physics, task, time_limit=time_limit, **environment_kwargs)
@@ -122,5 +147,36 @@ class PointMass(base.Task):
     control_reward = rewards.tolerance(physics.control(), margin=1,
                                        value_at_margin=0,
                                        sigmoid='quadratic').mean()
+    small_control = (control_reward + 4) / 5
+    return near_target * small_control
+
+
+class PointMass3D(base.Task):
+  """A 3D point_mass task to reach target with smooth reward."""
+
+  def __init__(self, random=None):
+    super().__init__(random=random)
+
+  def initialize_episode(self, physics):
+    """Sets the state of the environment at the start of each episode."""
+    randomizers.randomize_limited_and_rotational_joints(physics, self.random)
+    super().initialize_episode(physics)
+
+  def get_observation(self, physics):
+    """Returns an observation of the state."""
+    obs = collections.OrderedDict()
+    obs['position'] = physics.position()
+    obs['velocity'] = physics.velocity()
+    return obs
+
+  def get_reward(self, physics):
+    """Returns a reward to the agent."""
+    target_size = physics.named.model.geom_size['target', 0]
+    near_target = rewards.tolerance(
+        physics.mass_to_target_dist(), bounds=(0, target_size), margin=target_size
+    )
+    control_reward = rewards.tolerance(
+        physics.control(), margin=1, value_at_margin=0, sigmoid='quadratic'
+    ).mean()
     small_control = (control_reward + 4) / 5
     return near_target * small_control
