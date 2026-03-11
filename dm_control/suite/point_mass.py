@@ -27,6 +27,7 @@ from dm_control.utils import rewards
 import numpy as np
 
 _DEFAULT_TIME_LIMIT = 20
+_CONTROL_TIMESTEP = 0.06
 SUITE = containers.TaggedTasks()
 
 
@@ -47,7 +48,8 @@ def easy(time_limit=_DEFAULT_TIME_LIMIT, random=None, environment_kwargs=None):
   task = PointMass(randomize_gains=False, random=random)
   environment_kwargs = environment_kwargs or {}
   return control.Environment(
-      physics, task, time_limit=time_limit, **environment_kwargs)
+      physics, task, time_limit=time_limit, control_timestep=_CONTROL_TIMESTEP,
+      **environment_kwargs)
 
 
 @SUITE.add()
@@ -57,7 +59,8 @@ def hard(time_limit=_DEFAULT_TIME_LIMIT, random=None, environment_kwargs=None):
   task = PointMass(randomize_gains=True, random=random)
   environment_kwargs = environment_kwargs or {}
   return control.Environment(
-      physics, task, time_limit=time_limit, **environment_kwargs)
+      physics, task, time_limit=time_limit, control_timestep=_CONTROL_TIMESTEP,
+      **environment_kwargs)
 
 
 @SUITE.add('easy')
@@ -67,7 +70,8 @@ def easy_3d(time_limit=_DEFAULT_TIME_LIMIT, random=None, environment_kwargs=None
   task = PointMass3D(random=random)
   environment_kwargs = environment_kwargs or {}
   return control.Environment(
-      physics, task, time_limit=time_limit, **environment_kwargs)
+      physics, task, time_limit=time_limit, control_timestep=_CONTROL_TIMESTEP,
+      **environment_kwargs)
 
 
 @SUITE.add('hard')
@@ -77,7 +81,8 @@ def hard_3d(time_limit=_DEFAULT_TIME_LIMIT, random=None, environment_kwargs=None
   task = PointMass3D(random=random)
   environment_kwargs = environment_kwargs or {}
   return control.Environment(
-      physics, task, time_limit=time_limit, **environment_kwargs)
+      physics, task, time_limit=time_limit, control_timestep=_CONTROL_TIMESTEP,
+      **environment_kwargs)
 
 
 class Physics(mujoco.Physics):

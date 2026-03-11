@@ -43,16 +43,16 @@ def parse_args():
     )
     parser.add_argument("--horizon-sec", type=float, default=5.0)
     parser.add_argument("--n-anchors", type=int, default=4)
-    parser.add_argument("--velocity-scale", type=float, default=0.15)
-    parser.add_argument("--amax", type=float, default=0.15)
-    parser.add_argument("--kp", type=float, default=20.0)
-    parser.add_argument("--kd", type=float, default=8.0)
+    parser.add_argument("--velocity-scale", type=float, default=0.12)
+    parser.add_argument("--amax", type=float, default=0.12)
+    parser.add_argument("--kp", type=float, default=14.0)
+    parser.add_argument("--kd", type=float, default=5.0)
     parser.add_argument("--mass", type=float, default=0.3)
     parser.add_argument("--gear", type=float, default=0.1)
     parser.add_argument(
         "--action-noise-var",
         type=float,
-        default=0.01,
+        default=0.4,
         help="Variance of zero-mean Gaussian noise added to actions.",
     )
     parser.add_argument("--seed", type=int, default=0)
