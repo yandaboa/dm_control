@@ -23,16 +23,19 @@ from src.smerl.point2d_env import Point2DGoalEnv
 from src.smerl.smerl_sac import SMERLAgent, SMERLConfig
 
 
-def make_env(seed: int) -> Point2DGoalEnv:
-    return Point2DGoalEnv(seed=seed)
+def make_env(seed: int, start: tuple[float, float] | None = None,
+             goal: tuple[float, float] | None = None) -> Point2DGoalEnv:
+    return Point2DGoalEnv(seed=seed, start=start, goal=goal)
 
 
 def evaluate_skills(agent: SMERLAgent, env_seed: int, n_skills: int,
-                    n_episodes_per_skill: int = 3) -> dict:
+                    n_episodes_per_skill: int = 3,
+                    start: tuple[float, float] | None = None,
+                    goal: tuple[float, float] | None = None) -> dict:
     """Roll out each latent skill deterministically and report per-skill stats."""
     per_skill = []
     for z in range(n_skills):
-        env = make_env(env_seed)
+        env = make_env(env_seed, start=start, goal=goal)
         returns, successes, lens, end_dists = [], [], [], []
         for _ in range(n_episodes_per_skill):
             obs, _ = env.reset()
@@ -67,11 +70,13 @@ def evaluate_skills(agent: SMERLAgent, env_seed: int, n_skills: int,
 
 
 def collect_skill_trajectories(agent: SMERLAgent, env_seed: int,
-                               n_skills: int) -> dict:
+                               n_skills: int,
+                               start: tuple[float, float] | None = None,
+                               goal: tuple[float, float] | None = None) -> dict:
     """Single deterministic episode per skill — used to inspect diversity."""
     out = {}
     for z in range(n_skills):
-        env = make_env(env_seed)
+        env = make_env(env_seed, start=start, goal=goal)
         obs, _ = env.reset()
         traj = [env._pos.copy()]
         terminated = truncated = False
@@ -98,7 +103,15 @@ def main():
                     help="baseline SAC return; eps = eps_frac * |R_SAC|")
     ap.add_argument("--learning-starts", type=int, default=1_000)
     ap.add_argument("--eval-every", type=int, default=5_000)
+    ap.add_argument("--start", type=float, nargs=2, default=None,
+                    metavar=("X", "Y"),
+                    help="explicit start position (overrides --env-seed)")
+    ap.add_argument("--goal", type=float, nargs=2, default=None,
+                    metavar=("X", "Y"),
+                    help="explicit goal position (overrides --env-seed)")
     args = ap.parse_args()
+    start = tuple(args.start) if args.start is not None else None
+    goal = tuple(args.goal) if args.goal is not None else None
 
     torch.manual_seed(args.algo_seed)
     np.random.seed(args.algo_seed)
@@ -106,7 +119,7 @@ def main():
     os.makedirs(args.log_dir, exist_ok=True)
     device = torch.device(args.device)
 
-    env = make_env(args.env_seed)
+    env = make_env(args.env_seed, start=start, goal=goal)
     obs_dim = env.observation_space.shape[0]
     act_dim = env.action_space.shape[0]
 
@@ -179,7 +192,8 @@ def main():
 
         if t % args.eval_every == 0:
             stats = evaluate_skills(agent, args.env_seed, cfg.n_skills,
-                                    n_episodes_per_skill=2)
+                                    n_episodes_per_skill=2,
+                                    start=start, goal=goal)
             elapsed = time.time() - last_log_t
             last_log_t = time.time()
             log = {
@@ -205,8 +219,10 @@ def main():
 
     # ---- save artifacts ----
     final_stats = evaluate_skills(agent, args.env_seed, cfg.n_skills,
-                                  n_episodes_per_skill=5)
-    skill_trajs = collect_skill_trajectories(agent, args.env_seed, cfg.n_skills)
+                                  n_episodes_per_skill=5,
+                                  start=start, goal=goal)
+    skill_trajs = collect_skill_trajectories(agent, args.env_seed, cfg.n_skills,
+                                             start=start, goal=goal)
 
     out = {
         "config": {
@@ -219,6 +235,8 @@ def main():
             "total_timesteps": args.total_timesteps,
             "env_seed": args.env_seed,
             "algo_seed": args.algo_seed,
+            "start": list(env.start.tolist()),
+            "goal": list(env.goal.tolist()),
         },
         "history": history,
         "final": final_stats,

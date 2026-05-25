@@ -27,6 +27,8 @@ class Point2DGoalEnv(gym.Env):
         action_cost: float = 0.01,
         success_bonus: float = 10.0,
         min_start_goal_dist: float = 0.6,
+        start: tuple[float, float] | None = None,
+        goal: tuple[float, float] | None = None,
     ):
         super().__init__()
         self.world_half_extent = float(world_half_extent)
@@ -51,23 +53,37 @@ class Point2DGoalEnv(gym.Env):
             low=-1.0, high=1.0, shape=(2,), dtype=np.float32
         )
 
-        # Sample start and goal once, deterministically from ``seed``.
-        init_rng = np.random.default_rng(seed)
-        for _ in range(1000):
-            start = init_rng.uniform(
-                -self.world_half_extent, self.world_half_extent, size=2
-            )
-            goal = init_rng.uniform(
-                -self.world_half_extent, self.world_half_extent, size=2
-            )
-            if np.linalg.norm(goal - start) >= min_start_goal_dist:
-                break
+        if start is not None and goal is not None:
+            # Use the explicitly provided start/goal.
+            self._fixed_start = np.asarray(start, dtype=np.float32)
+            self._fixed_goal = np.asarray(goal, dtype=np.float32)
+            for arr, name in [(self._fixed_start, "start"),
+                              (self._fixed_goal, "goal")]:
+                if arr.shape != (2,):
+                    raise ValueError(f"{name} must have shape (2,), got {arr.shape}")
+                if np.any(np.abs(arr) > self.world_half_extent):
+                    raise ValueError(
+                        f"{name}={arr.tolist()} is outside world bounds "
+                        f"[-{self.world_half_extent}, {self.world_half_extent}]"
+                    )
         else:
-            raise RuntimeError(
-                "Could not sample start/goal pair satisfying min distance."
-            )
-        self._fixed_start = start.astype(np.float32)
-        self._fixed_goal = goal.astype(np.float32)
+            # Sample start and goal once, deterministically from ``seed``.
+            init_rng = np.random.default_rng(seed)
+            for _ in range(1000):
+                s = init_rng.uniform(
+                    -self.world_half_extent, self.world_half_extent, size=2
+                )
+                g = init_rng.uniform(
+                    -self.world_half_extent, self.world_half_extent, size=2
+                )
+                if np.linalg.norm(g - s) >= min_start_goal_dist:
+                    break
+            else:
+                raise RuntimeError(
+                    "Could not sample start/goal pair satisfying min distance."
+                )
+            self._fixed_start = s.astype(np.float32)
+            self._fixed_goal = g.astype(np.float32)
 
         self._pos = self._fixed_start.copy()
         self._vel = np.zeros(2, dtype=np.float32)

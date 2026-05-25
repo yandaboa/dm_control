@@ -21,9 +21,11 @@ from stable_baselines3.common.vec_env import DummyVecEnv
 from src.smerl.point2d_env import Point2DGoalEnv
 
 
-def make_env(seed: int, monitor_dir: str | None = None):
+def make_env(seed: int, monitor_dir: str | None = None,
+             start: tuple[float, float] | None = None,
+             goal: tuple[float, float] | None = None):
     def _thunk():
-        env = Point2DGoalEnv(seed=seed)
+        env = Point2DGoalEnv(seed=seed, start=start, goal=goal)
         if monitor_dir is not None:
             os.makedirs(monitor_dir, exist_ok=True)
             env = Monitor(env, filename=os.path.join(monitor_dir, "train"))
@@ -31,8 +33,10 @@ def make_env(seed: int, monitor_dir: str | None = None):
     return _thunk
 
 
-def evaluate(model: SAC, env_seed: int, n_episodes: int = 10) -> dict:
-    env = Point2DGoalEnv(seed=env_seed)
+def evaluate(model: SAC, env_seed: int, n_episodes: int = 10,
+             start: tuple[float, float] | None = None,
+             goal: tuple[float, float] | None = None) -> dict:
+    env = Point2DGoalEnv(seed=env_seed, start=start, goal=goal)
     successes, returns, final_dists, lengths = [], [], [], []
     for _ in range(n_episodes):
         obs, _ = env.reset()
@@ -67,15 +71,25 @@ def main():
                         default="src/smerl/runs/sac_point2d")
     parser.add_argument("--device", type=str, default="cpu",
                         help="cpu is fine — 2D obs + small MLP")
+    parser.add_argument("--start", type=float, nargs=2, default=None,
+                        metavar=("X", "Y"),
+                        help="explicit start position (overrides --env-seed)")
+    parser.add_argument("--goal", type=float, nargs=2, default=None,
+                        metavar=("X", "Y"),
+                        help="explicit goal position (overrides --env-seed)")
     args = parser.parse_args()
+
+    start = tuple(args.start) if args.start is not None else None
+    goal = tuple(args.goal) if args.goal is not None else None
 
     os.makedirs(args.log_dir, exist_ok=True)
     monitor_dir = os.path.join(args.log_dir, "monitor")
 
-    env = DummyVecEnv([make_env(args.env_seed, monitor_dir=monitor_dir)])
-    eval_env = DummyVecEnv([make_env(args.env_seed)])
+    env = DummyVecEnv([make_env(args.env_seed, monitor_dir=monitor_dir,
+                                start=start, goal=goal)])
+    eval_env = DummyVecEnv([make_env(args.env_seed, start=start, goal=goal)])
 
-    probe = Point2DGoalEnv(seed=args.env_seed)
+    probe = Point2DGoalEnv(seed=args.env_seed, start=start, goal=goal)
     print(f"[env] start={probe.start.tolist()}  goal={probe.goal.tolist()}  "
           f"distance={float(np.linalg.norm(probe.goal - probe.start)):.3f}")
 
@@ -118,7 +132,7 @@ def main():
     model.save(final_path)
     print(f"[train] saved final model to {final_path}")
 
-    stats = evaluate(model, args.env_seed, n_episodes=20)
+    stats = evaluate(model, args.env_seed, n_episodes=20, start=start, goal=goal)
     print(f"[eval] {stats}")
 
     with open(os.path.join(args.log_dir, "eval_summary.txt"), "w") as f:
