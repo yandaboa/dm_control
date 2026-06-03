@@ -25,21 +25,25 @@ from src.smerl.smerl_sac import SMERLAgent, SMERLConfig
 
 def make_env(seed: int, start: tuple[float, float] | None = None,
              goal: tuple[float, float] | None = None,
-             success_radius: float = 0.05) -> Point2DGoalEnv:
+             success_radius: float = 0.05,
+             max_episode_steps: int = 200) -> Point2DGoalEnv:
     return Point2DGoalEnv(seed=seed, start=start, goal=goal,
-                          success_radius=success_radius)
+                          success_radius=success_radius,
+                          max_episode_steps=max_episode_steps)
 
 
 def evaluate_skills(agent: SMERLAgent, env_seed: int, n_skills: int,
                     n_episodes_per_skill: int = 3,
                     start: tuple[float, float] | None = None,
                     goal: tuple[float, float] | None = None,
-                    success_radius: float = 0.05) -> dict:
+                    success_radius: float = 0.05,
+                    max_episode_steps: int = 200) -> dict:
     """Roll out each latent skill deterministically and report per-skill stats."""
     per_skill = []
     for z in range(n_skills):
         env = make_env(env_seed, start=start, goal=goal,
-                       success_radius=success_radius)
+                       success_radius=success_radius,
+                       max_episode_steps=max_episode_steps)
         returns, successes, lens, end_dists = [], [], [], []
         for _ in range(n_episodes_per_skill):
             obs, _ = env.reset()
@@ -77,12 +81,14 @@ def collect_skill_trajectories(agent: SMERLAgent, env_seed: int,
                                n_skills: int,
                                start: tuple[float, float] | None = None,
                                goal: tuple[float, float] | None = None,
-                               success_radius: float = 0.05) -> dict:
+                               success_radius: float = 0.05,
+                               max_episode_steps: int = 200) -> dict:
     """Single deterministic episode per skill — used to inspect diversity."""
     out = {}
     for z in range(n_skills):
         env = make_env(env_seed, start=start, goal=goal,
-                       success_radius=success_radius)
+                       success_radius=success_radius,
+                       max_episode_steps=max_episode_steps)
         obs, _ = env.reset()
         traj = [env._pos.copy()]
         terminated = truncated = False
@@ -116,6 +122,15 @@ def main():
                     metavar=("X", "Y"),
                     help="explicit goal position (overrides --env-seed)")
     ap.add_argument("--success-radius", type=float, default=0.05)
+    ap.add_argument("--max-episode-steps", type=int, default=200,
+                    help="env time limit; longer horizons give wandering "
+                         "(non-goal) skills more room to express diversity")
+    ap.add_argument("--diversity-warmup", type=int, default=0,
+                    help="force the diversity gate OFF (pure SAC) for the first "
+                         "N env steps so the task is learned before diversifying")
+    ap.add_argument("--checkpoint-every", type=int, default=0,
+                    help="if >0, save ckpt_step{t}.pt every N env steps so "
+                         "mid-training (e.g. pre-collapse) policies can be replayed")
     args = ap.parse_args()
     start = tuple(args.start) if args.start is not None else None
     goal = tuple(args.goal) if args.goal is not None else None
@@ -127,7 +142,8 @@ def main():
     os.makedirs(args.log_dir, exist_ok=True)
     device = torch.device(args.device)
 
-    env = make_env(args.env_seed, start=start, goal=goal, success_radius=sr)
+    env = make_env(args.env_seed, start=start, goal=goal, success_radius=sr,
+                   max_episode_steps=args.max_episode_steps)
     obs_dim = env.observation_space.shape[0]
     act_dim = env.action_space.shape[0]
 
@@ -144,7 +160,8 @@ def main():
     eps = cfg.eps_frac * abs(cfg.R_SAC)
     threshold = cfg.R_SAC - eps
     print(f"[smerl] |Z|={cfg.n_skills} alpha={cfg.alpha_div} "
-          f"eps={eps:.4f} (R_SAC={cfg.R_SAC}, threshold={threshold:.4f})")
+          f"eps={eps:.4f} (R_SAC={cfg.R_SAC}, threshold={threshold:.4f}) "
+          f"diversity_warmup={args.diversity_warmup}")
 
     agent = SMERLAgent(obs_dim, act_dim, cfg, device)
 
@@ -158,7 +175,23 @@ def main():
     history = []
     n_episodes = 0
     n_gated_episodes = 0
+    last_metrics: dict = {}            # most recent update() diagnostics
+    prev_ep = prev_gated = 0           # for incremental gate-flip rate
     last_log_t = time.time()
+
+    def save_checkpoint(path):
+        torch.save({"actor": agent.actor.state_dict(),
+                    "critic": agent.critic.state_dict(),
+                    "disc": agent.disc.state_dict(),
+                    "config": {"n_skills": cfg.n_skills, "alpha_div": cfg.alpha_div,
+                               "eps_frac": cfg.eps_frac, "eps": eps,
+                               "R_SAC": cfg.R_SAC, "threshold": threshold,
+                               "total_timesteps": args.total_timesteps,
+                               "env_seed": args.env_seed, "algo_seed": args.algo_seed,
+                               "start": list(env.start.tolist()),
+                               "goal": list(env.goal.tolist()), "success_radius": sr,
+                               "max_episode_steps": args.max_episode_steps,
+                               "diversity_warmup": args.diversity_warmup}}, path)
 
     for t in range(1, args.total_timesteps + 1):
         # action
@@ -178,7 +211,9 @@ def main():
         obs = next_obs
 
         if terminated or truncated:
-            indicator = 1.0 if episode_task_return >= threshold else 0.0
+            gate_on = t >= args.diversity_warmup
+            indicator = 1.0 if (gate_on and
+                                episode_task_return >= threshold) else 0.0
             for (s, ac, re, rt, ns, d, zz) in episode_buffer:
                 r_smerl = re + cfg.alpha_div * indicator * rt
                 agent.replay.add(s, ac, r_smerl, ns, d, zz)
@@ -196,23 +231,37 @@ def main():
         # gradient step(s)
         if t > cfg.learning_starts:
             for _ in range(cfg.grad_steps_per_env_step):
-                agent.update()
+                m = agent.update()
+                if m:
+                    last_metrics = m
 
         if t % args.eval_every == 0:
             stats = evaluate_skills(agent, args.env_seed, cfg.n_skills,
                                     n_episodes_per_skill=2,
-                                    start=start, goal=goal, success_radius=sr)
+                                    start=start, goal=goal, success_radius=sr,
+                                    max_episode_steps=args.max_episode_steps)
             elapsed = time.time() - last_log_t
             last_log_t = time.time()
+            # incremental gate-flip rate since last eval (debug diagnostic)
+            d_ep = n_episodes - prev_ep
+            gated_inc = (n_gated_episodes - prev_gated) / max(d_ep, 1)
+            prev_ep, prev_gated = n_episodes, n_gated_episodes
             log = {
                 "step": t,
                 "episodes": n_episodes,
                 "gated_frac": (n_gated_episodes / max(n_episodes, 1)),
+                "gated_inc": gated_inc,
                 "buffer_size": agent.replay.size,
                 "elapsed_s": round(elapsed, 1),
+                "critic_loss": last_metrics.get("critic_loss"),
+                "mean_q": last_metrics.get("mean_q"),
+                "disc_acc": last_metrics.get("disc_acc"),
+                "ent_coef": last_metrics.get("ent_coef"),
                 **stats,
             }
             history.append(log)
+            if args.checkpoint_every and t % args.checkpoint_every == 0:
+                save_checkpoint(os.path.join(args.log_dir, f"ckpt_step{t:06d}.pt"))
             top = stats["per_skill"]
             print(f"[t={t:>6d}] eps={n_episodes:4d}  gated={log['gated_frac']:.2f}  "
                   f"mean_R={stats['mean_return_across_skills']:.2f}  "
@@ -228,10 +277,12 @@ def main():
     # ---- save artifacts ----
     final_stats = evaluate_skills(agent, args.env_seed, cfg.n_skills,
                                   n_episodes_per_skill=5,
-                                  start=start, goal=goal, success_radius=sr)
+                                  start=start, goal=goal, success_radius=sr,
+                                  max_episode_steps=args.max_episode_steps)
     skill_trajs = collect_skill_trajectories(agent, args.env_seed, cfg.n_skills,
                                              start=start, goal=goal,
-                                             success_radius=sr)
+                                             success_radius=sr,
+                                             max_episode_steps=args.max_episode_steps)
 
     out = {
         "config": {
@@ -247,6 +298,8 @@ def main():
             "start": list(env.start.tolist()),
             "goal": list(env.goal.tolist()),
             "success_radius": sr,
+            "max_episode_steps": args.max_episode_steps,
+            "diversity_warmup": args.diversity_warmup,
         },
         "history": history,
         "final": final_stats,

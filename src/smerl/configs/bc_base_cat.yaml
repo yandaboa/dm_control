@@ -1,0 +1,35 @@
+# Clean base case: multimodal categorical-action transformer on 2 skills (0 & 4),
+# DART data only, 100-step horizon. NO loss reweighting (both heads are CE).
+#
+#   CUDA_VISIBLE_DEVICES=0 python -m src.smerl.train_seq \
+#     --config src/smerl/configs/bc_base_cat.yaml --run-name bc_base_cat --save-every 3
+
+data:
+  store: runs/smerl_lowalpha_ckpt/trajectories_dart12
+
+pattern:
+  - [state, skill]
+  - [skill, action]
+  - value
+
+model:
+  n_embd: 256
+  n_layer: 6
+  n_head: 4
+  dropout: 0.1
+  n_bins: 51
+  heads:
+    skill: categorical
+    action: disc            # per-dim categorical action (CE), no NLL
+
+optim:
+  epochs: 50
+  batch: 64
+  lr: 3.0e-4
+  weight_decay: 1.0e-2
+  grad_clip: 1.0
+  val_frac: 0.1
+
+seed: 0
+device: cuda
+out: runs/smerl_lowalpha_ckpt/bc_base_cat12.pt

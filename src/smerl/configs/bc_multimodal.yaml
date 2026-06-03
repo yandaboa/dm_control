@@ -1,0 +1,45 @@
+# Multimodal behavior cloning across ALL SMERL skills with a skill token.
+#
+# Token layout per timestep t (tiled over the trajectory):
+#     [state, skill]   -> input s_t; predict z_t (categorical over n_skills) from s_t
+#     [skill, action]  -> input z_t (embedding lookup); predict a_t (gaussian/NLL) from z_t
+#     value            -> input v_t = V(s_t, z_t) (skill-conditioned); no target
+# so the model sees  [s_0, z_0, v_0, s_1, z_1, v_1, ...]  and is supervised to
+# produce z_t (from s_t) and a_t (from z_t). Reordering z BEFORE v breaks the
+# rollout circularity: at a multimodal state we sample z_t from s_t, commit, then
+# look up V(s_t, z_t). Skill tokens flow back into context; action tokens do not.
+#
+# Edit anything below, then run (one model, GPU 0):
+#     CUDA_VISIBLE_DEVICES=0 python -m src.smerl.train_seq \
+#         --config src/smerl/configs/bc_multimodal.yaml --run-name bc_multimodal
+#
+# Trained on ~100 clean demos per skill (honest V(s,z), no forced failures).
+
+data:
+  store: runs/smerl_lowalpha_ckpt/trajectories_multimodal
+
+pattern:
+  - [state, skill]      # predict skill z_t (categorical) from the state token
+  - [skill, action]     # predict action a_t (gaussian/NLL) from the skill token
+  - value               # v_t = V(s_t, z_t): context-only, no target
+
+model:                  # GPT2 backbone
+  n_embd: 64
+  n_layer: 6
+  n_head: 4
+  dropout: 0.1          # settled value (see bc-transformer-hparams memory)
+  heads:
+    skill: categorical  # cross-entropy over n_skills
+    action: gaussian    # (mean, log_std) + NLL
+
+optim:
+  epochs: 50
+  batch: 64
+  lr: 3.0e-4
+  weight_decay: 1.0e-2
+  grad_clip: 1.0
+  val_frac: 0.1
+
+seed: 0
+device: cuda
+out: runs/smerl_lowalpha_ckpt/bc_multimodal.pt

@@ -1,0 +1,35 @@
+# Gaussian-head behavior cloning of SMERL skill 0, trained with NLL.
+#
+# Same token layout as bc_skill0.yaml ([s_1,v_1,...] -> a_t from v_t), but the
+# action head now outputs (mean, log_std) per action dim and is trained with
+# Gaussian negative log-likelihood instead of MSE. NLL fits the conditional
+# action *variance* too, so the stochastic-policy noise becomes learnable rather
+# than an irreducible MSE floor. Rollout eval uses the predicted mean.
+#
+#     python -m src.smerl.train_seq --config src/smerl/configs/bc_skill0_nll.yaml
+
+data:
+  store: runs/smerl_lowalpha_ckpt/trajectories_skill0
+
+pattern:
+  - state
+  - [value, action]
+
+model:
+  head: gaussian      # (mean, log_std) action head + NLL loss
+  n_embd: 64
+  n_layer: 6
+  n_head: 4
+  dropout: 0.1
+
+optim:
+  epochs: 50
+  batch: 64
+  lr: 3.0e-4
+  weight_decay: 1.0e-2
+  grad_clip: 1.0
+  val_frac: 0.1
+
+seed: 0
+device: cuda
+out: runs/smerl_lowalpha_ckpt/bc_skill0_nll_n1000.pt

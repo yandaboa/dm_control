@@ -1,0 +1,35 @@
+# Combined DART + DAgger, categorical action, NO loss reweighting. DECOUPLED skill
+# target (skill_target). One arm of the decoupling ablation.
+data:
+  store:
+    - runs/smerl_lowalpha_ckpt/trajectories_dart2
+    - runs/smerl_lowalpha_ckpt/trajectories_dagger2
+
+pattern:
+  - [state, skill]
+  - [skill, action]
+  - value
+
+decouple: true              # skill target = decoupled skill_target
+
+model:
+  n_embd: 256
+  n_layer: 6
+  n_head: 4
+  dropout: 0.1
+  n_bins: 51
+  heads:
+    skill: categorical
+    action: disc
+
+optim:
+  epochs: 50
+  batch: 64
+  lr: 3.0e-4
+  weight_decay: 1.0e-2
+  grad_clip: 1.0
+  val_frac: 0.1
+
+seed: 0
+device: cuda
+out: runs/smerl_lowalpha_ckpt/bc_combined_cat_dec.pt

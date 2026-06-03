@@ -1,0 +1,38 @@
+# Behavior-cloning of SMERL skill 0 with a value-conditioned context.
+#
+# Token layout per timestep t (tiled over the whole trajectory):
+#     state            -> input token s_t (no supervised target)
+#     [value, action]  -> input token v_t; regress action a_t from v_t's hidden state
+# so the model sees  [s_1, v_1, s_2, v_2, ..., s_T, v_T]  and is supervised to
+# produce [a_1, ..., a_T], each a_t predicted (MSE) from the hidden rep of v_t.
+#
+# Edit anything below, then run:
+#     python -m src.smerl.train_seq --config src/smerl/configs/bc_skill0.yaml
+
+data:
+  # trajectory store (1000 clean skill-0 demos, honest V(s,0), no forced failures)
+  store: runs/smerl_lowalpha_ckpt/trajectories_skill0
+
+# per-timestep slots; "name" = input only, [in, target] = input + regression target
+pattern:
+  - state
+  - [value, action]
+
+model:                # GPT2 backbone
+  n_embd: 64
+  n_layer: 6
+  n_head: 4
+  dropout: 0.1
+  # n_positions: 1024 # default ~4x the sequence length; raise for long contexts
+
+optim:
+  epochs: 50
+  batch: 64
+  lr: 3.0e-4
+  weight_decay: 1.0e-2
+  grad_clip: 1.0
+  val_frac: 0.1
+
+seed: 0
+device: cuda          # set to "cpu" if no GPU
+out: runs/smerl_lowalpha_ckpt/bc_skill0_gpt2.pt

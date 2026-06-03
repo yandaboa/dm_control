@@ -1,0 +1,39 @@
+# ABLATION (-logic): one-factor change off the winner bc_logic_dec.
+# skills 1,2 (normalized value). DECOUPLED skill target + switch_weight 20 kept;
+# the ONLY change is logic: true -> false (drop the logic-gate auxiliary head).
+# Isolates whether the logic-gate probe is necessary to get switching.
+data:
+  store:
+    - runs/smerl_lowalpha_ckpt/trajectories_dart12
+    - runs/smerl_lowalpha_ckpt/trajectories_dagger12
+
+pattern:
+  - [state, skill]
+  - [skill, action]
+  - value
+
+decouple: true              # kept (as in the winner)
+switch_weight: 20.0         # kept (as in the winner)
+logic: false                # CHANGED: no logic-gate auxiliary head
+
+model:
+  n_embd: 256
+  n_layer: 6
+  n_head: 4
+  dropout: 0.1
+  n_bins: 51
+  heads:
+    skill: categorical
+    action: disc
+
+optim:
+  epochs: 50
+  batch: 64
+  lr: 3.0e-4
+  weight_decay: 1.0e-2
+  grad_clip: 1.0
+  val_frac: 0.1
+
+seed: 0
+device: cuda
+out: runs/smerl_lowalpha_ckpt/bc_nologic_dec.pt

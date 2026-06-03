@@ -1,0 +1,39 @@
+# Combined DART + DAgger, categorical action, COUPLED skill target (no decoupling),
+# NO loss reweighting. Adds a LOGIC-GATE auxiliary head on the state-token hidden:
+# weighted-BCE "does a switch happen here?" probe (training dynamics only, not
+# inference). pos_weight is auto-set to the mean switch-episode length.
+data:
+  store:
+    - runs/smerl_lowalpha_ckpt/trajectories_dart12
+    - runs/smerl_lowalpha_ckpt/trajectories_dagger12
+
+pattern:
+  - [state, skill]
+  - [skill, action]
+  - value
+
+decouple: false             # coupled skill target (executed skill)
+logic: false                 # enable the logic-gate aux head
+logic_weight: 1.0           # weight on the separate logic loss
+
+model:
+  n_embd: 256
+  n_layer: 6
+  n_head: 4
+  dropout: 0.1
+  n_bins: 51
+  heads:
+    skill: categorical
+    action: disc
+
+optim:
+  epochs: 50
+  batch: 64
+  lr: 3.0e-4
+  weight_decay: 1.0e-2
+  grad_clip: 1.0
+  val_frac: 0.1
+
+seed: 0
+device: cuda
+out: runs/smerl_lowalpha_ckpt/bc_nologic12.pt

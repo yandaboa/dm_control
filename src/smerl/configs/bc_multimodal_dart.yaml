@@ -1,0 +1,37 @@
+# Multimodal skill-token BC on DART-noised demos (500/skill).
+# Same architecture/token layout as bc_multimodal.yaml; only the data store differs
+# — demos collected with DART action noise (clean targets, noised applied actions)
+# so the clone sees recovery states near where it drifts at test time.
+#
+#   CUDA_VISIBLE_DEVICES=0 python -m src.smerl.train_seq \
+#     --config src/smerl/configs/bc_multimodal_dart.yaml \
+#     --run-name bc_multimodal_dart --save-every 3
+
+data:
+  store: runs/smerl_lowalpha_ckpt/trajectories_multimodal_dart
+
+pattern:
+  - [state, skill]
+  - [skill, action]
+  - value
+
+model:
+  n_embd: 64
+  n_layer: 6
+  n_head: 4
+  dropout: 0.1
+  heads:
+    skill: categorical
+    action: gaussian
+
+optim:
+  epochs: 50
+  batch: 64
+  lr: 3.0e-4
+  weight_decay: 1.0e-2
+  grad_clip: 1.0
+  val_frac: 0.1
+
+seed: 0
+device: cuda
+out: runs/smerl_lowalpha_ckpt/bc_multimodal_dart.pt

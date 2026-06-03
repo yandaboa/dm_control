@@ -1,0 +1,472 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath, amssymb, amsthm}
+\usepackage{bm}
+\usepackage{booktabs}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{xcolor}
+\usepackage[colorlinks=true, linkcolor=blue, citecolor=blue]{hyperref}
+
+% ---- notation shorthands -------------------------------------------------
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\st}{s}
+\newcommand{\Vnorm}{\widetilde{V}}
+\newcommand{\theem}{\bm{\theta}}
+\newcommand{\skill}{z}
+\newcommand{\given}{\,\vert\,}
+\newcommand{\argmax}{\operatorname*{arg\,max}}
+\newcommand{\softmax}{\operatorname{softmax}}
+\newcommand{\Bern}{\mathrm{Bernoulli}}
+\newcommand{\Unif}{\mathcal{U}}
+\newcommand{\code}[1]{\texttt{\small #1}}
+
+\title{\textbf{An Adaptive Skill-Switching Transformer:\\
+HG-DAgger inside a Bayes-Adaptive MDP of Synthetic Failures}}
+\author{SMERL project --- technical note}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+We formalize a method for training a transformer policy that \emph{adapts on-line}:
+it commits to a behavioral skill, monitors a scalar value signal, and abandons the
+skill for a better one when that signal stalls. The skill repertoire is a fixed set
+of $K$ skill-conditioned controllers (e.g.\ a SMERL actor on a $2$D point-goal task).
+Adaptation is learned, not hand-coded, by three coupled pieces. (i)~A
+\emph{Bayes-Adaptive MDP} (BAMDP) injects \emph{synthetic} failures: a latent
+per-skill failure rate $\theem$ is drawn each meta-episode, and a hazard process
+corrupts the exposed value so a doomed run is visible as a value that stops climbing.
+(ii)~An \emph{HG-DAgger} loop collects on-policy intervention demonstrations in which
+an expert takes over with a good skill once the value has stalled. (iii)~A causal
+\emph{multimodal transformer} is trained by behavior cloning on the merged data with
+a sequence of state, skill, and value tokens, predicting the skill from the state and
+the action from the skill. At inference the model re-reads its own skill head each
+step; a change in the committed skill is a switch. We give the exact generative
+process, loss, and rollout procedure as implemented.
+\end{abstract}
+
+\tableofcontents
+
+% =========================================================================
+\section{Setup and notation}
+\label{sec:setup}
+
+\paragraph{Base MDP.}
+The base environment is a deterministic $2$D point-mass goal-reaching MDP with state
+$\st=(x,y,\dot x,\dot y,g_x,g_y)\in\R^{6}$, continuous action $a\in[-1,1]^2$
+(acceleration), fixed start and goal, and a sparse-ish reward
+$r(\st,a)=-\lVert (x,y)-(g_x,g_y)\rVert - c\lVert a\rVert^2$ with a success bonus when
+the agent enters the goal radius. Episodes have horizon $H$ (we use $H=100$).
+
+\paragraph{Skills.}
+A pretrained SMERL actor provides $K$ skill-conditioned controllers
+$\pi(a\given \st,\skill)$, $\skill\in\{0,\dots,K-1\}$. Each skill is a distinct,
+near-deterministic route to the goal; we write $\pi(\st,\skill)$ for its deterministic
+action $\argmax$. The skills are \emph{given} and frozen throughout.
+
+\paragraph{Skill-conditioned value.}
+A skill-conditioned state value $V(\st,\skill)\in\R$ is trained by Monte-Carlo
+regression on success-returns (\code{train\_task\_value.py}). It estimates how well
+skill $\skill$ is doing from state $\st$; it climbs toward its maximum as the skill
+nears the goal. We use a skill-conditioned $V(\st,\skill)$ rather than a single
+task value $V(\st)$ because the former gives a much steeper, skill-identifiable
+climb (the chosen ablation).
+
+\paragraph{Per-skill value normalization.}
+To make a stall maximally legible we rescale each skill's value to $[0,1]$:
+\begin{equation}
+\Vnorm(\st,\skill) \;=\;
+\operatorname{clip}\!\left(\frac{V(\st,\skill)-v^{\min}_{\skill}}
+{v^{\max}_{\skill}-v^{\min}_{\skill}},\, 0,\, 1\right),
+\label{eq:vnorm}
+\end{equation}
+where $(v^{\min}_{\skill},v^{\max}_{\skill})$ are the $[1,99]$ percentiles of
+$V(\cdot,\skill)$ over deterministic rollouts of skill $\skill$ from perturbed starts
+(\code{compute\_skill\_value\_norm}). This steepens the climb so a frozen value is an
+unambiguous plateau. Skills not in the normalized set pass through unchanged.
+
+% =========================================================================
+\section{The Bayes-Adaptive MDP of synthetic failures}
+\label{sec:bamdp}
+
+The BAMDP (\code{bamdp\_env.py}, class \code{SyntheticFailureBAMDP}) wraps the base
+env and injects failures whose statistics depend on a hidden latent. It is the
+training ground in which a stall \emph{means} ``this skill will not succeed.''
+
+\subsection{Latent and meta-episodes}
+A \emph{meta-episode} fixes a latent vector of per-skill \emph{failure rates}
+\begin{equation}
+\theem=(p_1,\dots,p_K), \qquad p_i \sim \mathrm{Beta}(\alpha,\beta)\ \text{i.i.d.}
+\end{equation}
+($\alpha=\beta=0.5$ by default). In the two-skill regime we actually train on, we
+override the prior with a structured draw: one of the in-play skills is made
+\emph{bad}, $p_{\mathrm{bad}}=0.95$, the rest near-safe, $p_i=0.02$. The latent
+$\theem$ is what a Bayes-optimal agent must infer from the value stream; it is not
+observed. Each failure rate is converted to a total \emph{hazard budget}
+\begin{equation}
+H_i \;=\; -\ln(1-p_i),
+\end{equation}
+so that spending the whole budget over an episode reproduces the marginal failure
+probability $p_i$.
+
+\subsection{Hazard injection (the \texttt{certain\_skill} mechanism)}
+At each step the wrapper forms a belief $w\in\Delta^{K-1}$ over which skill is
+currently executing. In general $w=\softmax(\text{Disc}(\st))$ from a behavioral
+discriminator; in the simplified regime we use (\code{certain\_skill}), the running
+skill is \emph{known}, so $w$ is a one-hot on the active skill $\skill_{\mathrm{act}}$:
+\begin{equation}
+w \;=\; e_{\skill_{\mathrm{act}}}.
+\end{equation}
+Under the \emph{budget} schedule, the per-skill instantaneous hazard spends the
+remaining budget over the estimated remaining steps,
+\begin{equation}
+h_i \;=\; \frac{H^{\mathrm{rem}}_i}{\max(r^{\mathrm{rem}}_i,\, 1)},\qquad
+h \;=\; \textstyle\sum_i w_i\, h_i,\qquad
+f \;=\; 1-e^{-h},
+\end{equation}
+and a forced failure is drawn $F_t\sim\Bern(f)$. The budget is then debited in
+proportion to presence, $H^{\mathrm{rem}}_i \leftarrow \max(H^{\mathrm{rem}}_i - w_i
+h_i,0)$ and $r^{\mathrm{rem}}_i \leftarrow r^{\mathrm{rem}}_i - w_i$. Because $w$ is a
+one-hot, the active skill draws failures at exactly its own hazard $h_{\skill_{\mathrm
+{act}}}$ --- the discriminator is treated as certain ($p=1$).
+
+\subsection{Absorbing failure and value corruption}
+Failures are \emph{continuing} (\code{continue\_on\_failure}): a forced failure does
+\emph{not} end the episode. Instead it is an absorbing event that decouples the
+\emph{exposed} value $v^{\mathrm{obs}}_t$ from the true state value. While healthy,
+\begin{equation}
+v^{\mathrm{obs}}_t \;=\; \Vnorm(\st_t,\skill_{\mathrm{act}}).
+\end{equation}
+At the failure instant $t_f$ we freeze $v^\star=\Vnorm(\st_{t_f},\skill_{\mathrm{act}})$
+and pick a corruption mode $\in\{\text{plateau},\text{decline}\}$ with probability
+$\tfrac12$ each; thereafter
+\begin{equation}
+v^{\mathrm{obs}}_{t_f+k} \;=\;
+\begin{cases}
+v^\star & \text{plateau},\\[2pt]
+v^\star\,\gamma^{\,k} & \text{decline}\ (\gamma=0.95).
+\end{cases}
+\label{eq:corrupt}
+\end{equation}
+A doomed run is therefore visible as a value that stops climbing toward $1$ (plateau)
+or sags (decline). Once failed, no further failures are injected (the event is
+absorbing) and the goal bonus is suppressed, so the run truncates at $H$ without
+success.
+
+\subsection{Observation interface}
+With value exposure on, the wrapper returns a \emph{dict} so each consumer reads the
+right stream:
+\begin{equation}
+o_t=\big\{\,\code{state}=\st_t\in\R^{6},\ \ \code{value}=v^{\mathrm{obs}}_t\in[0,1],
+\ \ \code{failing}=\mathbf{1}[\text{failed}]\in\{0,1\}\,\big\}.
+\end{equation}
+The skill controller is driven with \code{state} only (it was trained on the bare
+$6$-D observation); \code{value} is the adaptation signal; \code{failing} is used only
+for bookkeeping during data collection, never at test time.
+
+\subsection{Switching and intervention semantics}
+Two operations change the active skill mid-episode.
+\begin{itemize}
+\item \textbf{Agent switch} (test time, \code{switch\_skill}): re-evaluate failure
+under the new skill --- clear the absorbing flag and refresh $v^{\mathrm{obs}}$ ---
+but \emph{keep injecting} failures, because the new skill may also be bad.
+\item \textbf{Expert intervention} (training time, \code{intervene}): same, but also
+\emph{stop} injecting failures for the rest of the sub-episode, so the good skill runs
+cleanly to the goal.
+\end{itemize}
+In both cases, with \code{reset\_on\_switch} enabled the environment \emph{teleports}
+to a fresh start (a new draw of the base env) and resets the per-attempt hazard/value
+state, while \emph{keeping the meta step clock} $t$. Operationally, a switch is
+``give up and retry from scratch with the other skill,'' the two attempts sharing one
+horizon budget $H$. This makes a switch a genuine state \emph{and} value
+discontinuity, which the transformer must key on.
+
+% =========================================================================
+\section{HG-DAgger data collection}
+\label{sec:dagger}
+
+We collect two stores and merge them. A \emph{base} store of clean
+skill demonstrations (with DART action noise on the environment) anchors the action
+and skill heads; a \emph{DAgger} store of on-policy interventions teaches the switch.
+
+\subsection{DART base demonstrations}
+For each skill we roll the deterministic teacher $\pi(\st,\skill)$ and store the clean
+action as the target, while the \emph{environment} is driven by a DART-noised action
+\begin{equation}
+\tilde a_t \;=\; \operatorname{clip}\big(\pi(\st_t,\skill) + \epsilon_t,\,-1,1\big),
+\qquad \epsilon_t\sim\Unif(-c,c)^2,
+\end{equation}
+with $c$ a small fraction (5\%) of the mean action magnitude. Recording the clean
+action under noised states is the DART recipe: it widens state coverage so the cloned
+policy is robust to its own drift, without biasing the action targets.
+
+\subsection{On-policy interventions}
+Each DAgger episode (Algorithm~\ref{alg:dagger}) is an HG-DAgger rollout: the
+\emph{transformer under training} chooses the skill to attempt, the teacher executes
+it, the BAMDP decides whether it fails, and an \emph{expert} intervenes once the
+failure has been visible for a few steps.
+
+\begin{algorithm}[t]
+\caption{Collect one HG-DAgger intervention episode (\code{collect\_dagger\_episode})}
+\label{alg:dagger}
+\begin{algorithmic}[1]
+\Require BAMDP with latent $\theem$ (one bad skill); transformer $M$; teacher $\pi$;
+expert good skill $\skill_{\mathrm{good}}$; window $[k_{\min},k_{\max}]$; delay $d$.
+\State $o\gets\textsc{BamdpReset}()$; \ $\st_0\gets o.\code{state}$
+\State $\skill_0\sim \softmax\big(M_{\mathrm{skill}}(\st_0)\big)$
+\Comment{on-policy: attempt the model's own skill}
+\If{$\skill_{\mathrm{good}}=\skill_0$} re-draw $\skill_{\mathrm{good}}$ from the top-2
+of $1-\theem$, $\neq \skill_0$ \EndIf
+\State $\textsc{SetActiveSkill}(\skill_0)$; \ active $\gets\skill_0$;\ intervened
+$\gets$ false;\ $K\sim\Unif\{k_{\min},\dots,k_{\max}\}$
+\While{episode not done}
+  \State $a_t \gets \pi(\st_t,\text{active})$
+  \Comment{clean action = \emph{target}}
+  \State $\tilde a_t \gets \operatorname{clip}(a_t+\epsilon_t,-1,1)$;\quad
+         $o',r,\text{done}\gets\textsc{BamdpStep}(\tilde a_t)$
+  \State record $a_t$, active skill, $v^{\mathrm{obs}}_t$, \code{failing}$_t$
+  \If{$\neg$intervened \textbf{and} \code{failing}$_t$}
+     \State $k_{\mathrm{fail}}\!\mathrel{+}=\!1$;\quad
+            \textbf{if } $k_{\mathrm{fail}}\ge K$ \textbf{ then }
+            $\textsc{Intervene}(\skill_{\mathrm{good}})$; active $\gets
+            \skill_{\mathrm{good}}$; intervened $\gets$ true
+  \EndIf
+  \State $o \gets \textsc{Observe}()$ \textbf{if} just-switched (re-read the fresh
+         teleported start) \textbf{else} $o'$
+\EndWhile
+\State \textbf{keep} the episode iff (intervened \textbf{and} success)
+\State \Return episode dict with per-step \code{skills} and decoupled
+\code{skill\_target}
+\end{algorithmic}
+\end{algorithm}
+
+\paragraph{Choosing the takeover skill.}
+The expert's good skill is sampled from the two highest success rates
+$1-\theem$ (so it is among the genuinely-good options), forced to differ from
+$\skill_0$ so a real switch occurs (\code{pick\_good\_skill}).
+
+\paragraph{Decoupled skill target.}
+This is the key labeling trick. The \emph{executed} skill token in the sequence stays
+$\skill_0$ until the physical switch, but the \emph{target} skill label flips to
+$\skill_{\mathrm{good}}$ a few steps after the failure becomes observable:
+\begin{equation}
+\code{skill\_target}_t =
+\begin{cases}
+\skill_0 & t < t_f-1+d,\\
+\skill_{\mathrm{good}} & t \ge t_f-1+d,
+\end{cases}
+\qquad d=2\ \text{(observation delay)}.
+\end{equation}
+So while the value is still stalling (executed skill $\skill_0$ remains in context),
+the supervised \emph{decision} is already ``switch to $\skill_{\mathrm{good}}$.'' This
+decoupling is what teaches the skill head to act on the stall rather than merely to
+repeat whatever skill produced the action. (The ablation that couples target to the
+executed skill never learns to switch.)
+
+\paragraph{Keep filter and merge.}
+Only episodes that intervened \emph{and} reached the goal are kept --- the dataset
+shows the policy a stall followed by a \emph{successful} recovery. The kept DAgger
+store is concatenated with the DART base store; \code{SeqDataset} interleaves episodes
+from both directories.
+
+% =========================================================================
+\section{The multimodal transformer and its training}
+\label{sec:transformer}
+
+\subsection{Token layout}
+Each timestep is expanded into three tokens, in the order \emph{state, skill, value}:
+\begin{equation}
+\underbrace{\st_0}_{\text{state}}\ \underbrace{\skill_0}_{\text{skill}}\
+\underbrace{v_0}_{\text{value}}\ \ \st_1\ \skill_1\ v_1\ \ \cdots
+\end{equation}
+The supervision pattern (\code{pattern: [[state, skill], [skill, action], value]}) is:
+\begin{itemize}
+\item from the \textbf{state} token, predict the \textbf{skill} $\skill_t$ (this is
+the switch decision);
+\item from the \textbf{skill} token, predict the \textbf{action} $a_t$;
+\item the \textbf{value} token is an input only (never predicted).
+\end{itemize}
+Placing the skill token \emph{before} the value and action makes the policy
+\emph{express} which skill it is running, and lets the action head condition on it.
+
+\subsection{Backbone}
+A self-contained, minGPT-style causal transformer (\code{TrajectoryGPT}) consumes
+\emph{continuous} token embeddings: one linear (or, for the discrete skill, an
+embedding-lookup) encoder per modality maps a raw token to $\R^{E}$, a learned
+\emph{type} embedding per modality is added, and learned positional embeddings and
+causal masking complete the input. We use $E=256$, $6$ layers, $4$ heads, dropout
+$0.1$. The hidden at position $i$ predicts token $i{+}1$ through \emph{that target's}
+modality head, with a per-position loss mask selecting which predictions count.
+
+\subsection{Heads and per-modality losses}
+\paragraph{Skill head (categorical).}
+A linear map to $K$ logits; cross-entropy against the (decoupled) target skill:
+\begin{equation}
+\ell^{\mathrm{skill}}_t \;=\; \mathrm{CE}\big(M_{\mathrm{skill}}(\st_t),\,
+\code{skill\_target}_t\big).
+\end{equation}
+
+\paragraph{Action head (discretized, ``disc'').}
+Rather than a Gaussian (whose NLL gradients are pathological here), each action
+dimension is a categorical over $B$ uniform bins on $[-1,1]$ ($B=51$). For target
+$a_t\in[-1,1]^{2}$ the bin index is
+$\iota_{t,j}=\big\lfloor \tfrac{(a_{t,j}+1)}{2}B\big\rfloor$ (clamped), and
+\begin{equation}
+\ell^{\mathrm{act}}_t \;=\; \sum_{j=1}^{2}
+\mathrm{CE}\big(M_{\mathrm{act}}(\skill_t)_{j},\,\iota_{t,j}\big).
+\end{equation}
+At rollout the action is read back as the bin-center of the $\argmax$ per dimension.
+
+\paragraph{Two layers of class balancing.}
+The switch decision is rare, so we upweight it at two levels.
+\begin{itemize}
+\item \emph{Layer 1 (per-position).} A switch-decision position --- a state token whose
+executed skill changes next step, $\skill_{t+1}\neq\skill_t$ --- gets loss weight
+$\omega=20$; all other positions weight $1$. Within a modality the loss is the
+weighted mean
+\begin{equation}
+\mathcal{L}_{\text{mod}} \;=\;
+\frac{\sum_{t\in\text{mod}} \omega_t\,\ell_t}{\sum_{t\in\text{mod}} \omega_t}.
+\end{equation}
+\item \emph{Layer 2 (per-modality).} An optional multiplier $\lambda_{\text{mod}}$
+keeps the action NLL from dominating the shared trunk; the token loss is
+\begin{equation}
+\mathcal{L}_{\mathrm{tok}} \;=\; \sum_{\text{mod}\in\{\text{skill},\text{act}\}}
+\lambda_{\text{mod}}\,\mathcal{L}_{\text{mod}}.
+\end{equation}
+\end{itemize}
+
+\subsection{The logic gate (a training-dynamics probe)}
+To verify that the \emph{hidden representation} at the state token actually contains
+enough signal to detect a switch, we attach an auxiliary binary head
+$g=\sigma(M_{\mathrm{logic}}(h_{\mathrm{state}}))$ predicting ``does a switch happen
+here?'' It is trained with weighted BCE \emph{restricted to switch-containing
+episodes} (the pure no-switch DART episodes are all-negative and would bias it to
+``never switch''), with positive class weight $\rho=50$:
+\begin{equation}
+\mathcal{L}_{\mathrm{logic}} \;=\;
+\mathrm{BCE}_{\rho}\!\big(M_{\mathrm{logic}}(h_{\mathrm{state}}),\,
+\mathbf{1}[\text{switch}]\big),
+\qquad
+\mathcal{L} \;=\; \mathcal{L}_{\mathrm{tok}} + \lambda_{\mathrm{logic}}\,
+\mathcal{L}_{\mathrm{logic}}.
+\end{equation}
+Crucially the logic gate is a \emph{diagnostic only}: it shares the backbone so its
+high recall ($\approx0.9$) certifies the switch is decodable, but it is \emph{never}
+consulted at inference. Comparing runs, when the logic gate confirms the signal is
+present while the skill head still won't switch, the cure is the decoupled target plus
+the layer-1 switch upweighting --- not more capacity.
+
+\subsection{Optimizer and the closed-loop selection caveat}
+AdamW, learning rate $3\!\times\!10^{-4}$, weight decay $10^{-2}$, gradient clip $1.0$,
+batch $64$, $50$ epochs. We log, per epoch: per-modality validation losses, per-skill
+action NLL, per-term backbone gradient norms and their cosine (to detect objectives
+fighting over the trunk), the logic-gate precision/recall, and a \emph{switch
+analytic} on the validation set --- at switch-decision positions, the skill head's
+$P(\text{new})$, $P(\text{stay})$, and $\argmax$ accuracy. The offline validation loss
+\emph{anti-correlates} with closed-loop success, so models are selected by closed-loop
+rollout, not by held-out loss; the switch analytic ($\code{acc}:0\to0.85$ for the
+decoupled run vs.\ $0\to0$ for the coupled one) predicts closed-loop behavior well.
+
+% =========================================================================
+\section{Inference}
+\label{sec:inference}
+
+At test time the transformer drives the BAMDP autoregressively, re-reading its own
+skill head every step (Algorithm~\ref{alg:infer}, \code{rollout\_record}). There is no
+discriminator and no logic gate; the only adaptation signal is the value token that
+the BAMDP feeds back.
+
+\begin{algorithm}[t]
+\caption{Closed-loop rollout with on-line skill switching (\code{rollout\_record})}
+\label{alg:infer}
+\begin{algorithmic}[1]
+\State history $\gets[\,]$;\ \ active $\gets \varnothing$
+\While{episode not done}
+  \State append state token $\st_t$ to history; \ $h\gets M(\text{history})$
+  \State $\skill_t \gets \argmax M_{\mathrm{skill}}(h)$
+  \Comment{the committed skill (argmax of the skill head)}
+  \If{active $=\varnothing$}
+     \State active $\gets \skill_t$; \ \textsc{SetActiveSkill}($\skill_t$)
+  \ElsIf{$\skill_t \neq$ active}
+     \State \textsc{SwitchSkill}($\skill_t$)
+     \Comment{teleport to a fresh start (reset-on-switch), keep clock}
+     \State $\st_t \gets \textsc{Observe}().\code{state}$; \ overwrite the last state
+            token with the fresh start
+     \State active $\gets \skill_t$; \ record a switch at $t$
+  \EndIf
+  \State append skill token $\skill_t$;\quad
+         $a_t \gets \operatorname{clip}\big(\text{bin-center}\,\argmax\,
+         M_{\mathrm{act}}(h),-1,1\big)$
+  \State append value token $v^{\mathrm{obs}}_t$;\quad
+         $o,\,\text{done}\gets\textsc{BamdpStep}(a_t)$;\quad $t\gets t{+}1$
+\EndWhile
+\end{algorithmic}
+\end{algorithm}
+
+\paragraph{Commitment and switching.}
+Because the skill token is fed back into context, the model behaves as
+\emph{sample-and-commit}: once a skill is in the history the skill head repeats it
+(empirical stay probability $\approx0.993$) until the value stream stalls, at which
+point the head flips to the good skill --- a switch. Under reset-on-switch the env
+teleports to a fresh start, so the post-switch action must be computed from the
+\emph{re-observed} fresh state; the implementation overwrites the just-appended state
+token after the teleport so action and state are aligned. (Skipping this realignment
+silently yields a policy that ``switches'' but never recovers, an instructive bug.)
+
+\paragraph{What triggers a switch.}
+Nothing in the loop references the goal or the latent. The switch is driven purely by
+the exposed value $v^{\mathrm{obs}}_t$ flattening: in context, a sequence of value
+tokens that climbs and then goes flat is the learned cue for ``abandon this skill.''
+That is exactly the corruption signature \eqref{eq:corrupt} the model was trained on.
+
+% =========================================================================
+\section{Validation: transfer to a physical obstacle}
+\label{sec:validation}
+
+The policy is trained \emph{only} on synthetic value corruption. To check that it
+learned a genuine stall$\to$switch reflex rather than memorizing the injection
+statistics, we evaluate it with \emph{no injected failures} ($\theem=\mathbf 0$) in an
+environment carrying a real obstacle: a circular \emph{freeze-on-contact} region
+(\code{WallPoint2DGoalEnv}). The first time the point enters the region it is frozen
+permanently (velocity zeroed, position held), so a skill whose path runs through it
+gets physically stuck; its state stops progressing and $\Vnorm$ flatlines --- the
+\emph{real} version of the synthetic failure. The obstacle is placed on one skill's
+path while sparing the other (verified by rollout).
+
+Across $60$ such walls the policy reaches the goal and switches to the unobstructed
+skill in $60/60$ trials, with switches occurring at a mean step of $25.4$ (never in
+the first $5$ steps) and the exposed value flat ($\Delta v\approx 0$ over the $5$ steps
+before the switch) at a stalled level $\approx0.31\ll 1$. The behavior is symmetric:
+forcing the policy to commit to the other skill and walling \emph{that} path yields the
+reverse switch in $52/52$ trials. The synthetic-failure curriculum therefore transfers
+to a physical stall it never saw in training.
+
+% =========================================================================
+\section{Summary}
+\label{sec:summary}
+
+\begin{enumerate}
+\item A \emph{BAMDP} (\S\ref{sec:bamdp}) turns a fixed skill set into an adaptation
+problem: a hidden per-skill failure rate $\theem$ drives a hazard process whose
+absorbing failures corrupt an exposed, per-skill-normalized value so that a doomed run
+is a value that stops climbing.
+\item \emph{HG-DAgger} (\S\ref{sec:dagger}) collects on-policy episodes where the
+transformer picks the skill, the BAMDP fails it, and an expert takes over with a good
+skill after a short delay; the \emph{decoupled} skill target labels the switch a few
+steps before the physical takeover.
+\item A causal \emph{multimodal transformer} (\S\ref{sec:transformer}) is behavior-cloned
+on state/skill/value tokens, predicting skill-from-state and action-from-skill, with
+discretized actions, two layers of switch upweighting, and a logic-gate probe that
+certifies the switch is decodable.
+\item At \emph{inference} (\S\ref{sec:inference}) the model commits to a skill and
+re-reads its skill head each step; a flat value stream flips the head to a better
+skill, which under reset-on-switch retries from a fresh start --- and this transfers to
+a real physical obstacle (\S\ref{sec:validation}).
+\end{enumerate}
+
+\end{document}

@@ -1,0 +1,41 @@
+# Ablation arm 3 — CATEGORICAL action: discretize the action into per-dim bins and
+# predict with cross-entropy ("disc" head), so BOTH heads are CE (same scale) and
+# there's no Gaussian-NLL gradient pathology to balance against. Layer 1 on; a mild
+# modality weight on skill since the per-dim action CE (summed over 2 dims) is a bit
+# larger than skill CE.
+data:
+  store:
+    - runs/smerl_lowalpha_ckpt/trajectories_multimodal_dart
+    - runs/smerl_lowalpha_ckpt/trajectories_dagger
+
+pattern:
+  - [state, skill]
+  - [skill, action]
+  - value
+
+switch_weight: 20.0         # layer 1 ON
+
+model:
+  n_embd: 256
+  n_layer: 6
+  n_head: 4
+  dropout: 0.1
+  n_bins: 25                # action bins per dim over [-1, 1]
+  heads:
+    skill: categorical
+    action: disc            # per-dim categorical action (CE), not Gaussian NLL
+  loss_weights:
+    skill: 3.0
+    action: 1.0
+
+optim:
+  epochs: 50
+  batch: 64
+  lr: 3.0e-4
+  weight_decay: 1.0e-2
+  grad_clip: 1.0
+  val_frac: 0.1
+
+seed: 0
+device: cuda
+out: runs/smerl_lowalpha_ckpt/bc_dagger_catact.pt

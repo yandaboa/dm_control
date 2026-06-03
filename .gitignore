@@ -13,3 +13,23 @@ dm_control/mujoco/wrapper/mjbindings/*.py
 # Datasets and visualizations
 datasets/
 renders/
+
+# random data files from experiments
+*.zip
+*.csv
+*.pt
+*.png
+*.npz
+*.txt
+*.json
+events.*
+*.log
+
+# SMERL: models, raw trajectory data, experiment logs, vendored libs
+# (graphs under src/smerl/runs are force-added; everything else here stays out)
+src/isaaclab/
+wandb/
+get-docker.sh
+**/trajectories_*/
+*.mp4
+!src/smerl/runs/**/*.mp4
