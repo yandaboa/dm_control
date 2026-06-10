@@ -1,0 +1,42 @@
+# Phase 2 round 0 (bootstrap within-episode 3-skill base, skills 0,1,2).
+# Trained on DART base + the existing iter0 expert demos (iter0 learner was model-less,
+# but the expert's within-episode switch-on-stall demos are valid as a bootstrap driver;
+# the on-policy rounds below fix the cross-episode distribution). Locked config.
+data:
+  store:
+    - runs/smerl_lowalpha_ckpt/trajectories_dart012
+    - runs/smerl_lowalpha_ckpt/trajectories_dagger012_iter0
+
+pattern:
+  - [state, skill]
+  - [skill, action]
+  - value
+
+decouple: true
+balance_switch: true
+switch_share: 0.4
+logic: true
+logic_weight: 1.0
+
+model:
+  n_embd: 256
+  n_layer: 6
+  n_head: 4
+  dropout: 0.1
+  n_bins: 51
+  rope: true
+  heads:
+    skill: categorical
+    action: disc
+
+optim:
+  epochs: 50
+  batch: 8
+  lr: 3.0e-4
+  weight_decay: 1.0e-2
+  grad_clip: 1.0
+  val_frac: 0.1
+
+seed: 0
+device: cuda
+out: runs/smerl_lowalpha_ckpt/bc_phase2_r0.pt

@@ -1,0 +1,41 @@
+# 3-skill (0,1,2) adaptation, one round of DAgger. The original switching tricks
+# (NON-NEGOTIABLE): DECOUPLED skill target + switch upweighting + logic gate.
+# Merge clean DART base demos with the DAgger adaptation data.
+data:
+  store:
+    - runs/smerl_lowalpha_ckpt/trajectories_dart012
+    - runs/smerl_lowalpha_ckpt/trajectories_dagger012_iter0
+
+pattern:
+  - [state, skill]
+  - [skill, action]
+  - value
+
+decouple: true              # decoupled skill target (z_good at the decision step)
+balance_switch: true        # data-driven: decision-window tokens scaled by gradient share
+switch_share: 0.2           # bs8 3-seed sweep: RoPE+0.2 best (0.993±0.002)
+logic: true                 # logic-gate aux probe (auto pos_weight = mean switch-ep len)
+logic_weight: 1.0
+
+model:
+  n_embd: 256
+  n_layer: 6
+  n_head: 4
+  dropout: 0.1
+  rope: true                # relative positions: robust at bs8, avoids absolute-pos switch shortcut
+  n_bins: 51
+  heads:
+    skill: categorical
+    action: disc
+
+optim:
+  epochs: 50
+  batch: 8       # Phase-0: bs8 conditions switch on failure cue (~5 steps); bs64 fires at a fixed time
+  lr: 3.0e-4
+  weight_decay: 1.0e-2
+  grad_clip: 1.0
+  val_frac: 0.1
+
+seed: 0
+device: cuda
+out: runs/smerl_lowalpha_ckpt/bc_adapt_3skill.pt

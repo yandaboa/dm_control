@@ -1,0 +1,43 @@
+# Phase 1: cross-episode latching, skills 1,2. Trains on DART base + a fresh
+# META-EPISODIC on-policy store (collect_demos.py, learner = bc_bs8_share40, chained
+# sub-episodes under one shared theta) so the model learns to read multi-episode
+# history. ADOPTED Phase-0 config (3-seed sweep winner): batch 8, RoPE, switch_share 0.2,
+# constant LR. (wpe+share0.4 baseline trained in parallel as bc_phase1_12_wpe.yaml.)
+data:
+  store:
+    - runs/smerl_lowalpha_ckpt/trajectories_dart12
+    - runs/smerl_lowalpha_ckpt/trajectories_dagger12_meta
+
+pattern:
+  - [state, skill]
+  - [skill, action]
+  - value
+
+decouple: true
+balance_switch: true
+switch_share: 0.2
+logic: true
+logic_weight: 1.0
+
+model:
+  n_embd: 256
+  n_layer: 6
+  n_head: 4
+  dropout: 0.1
+  n_bins: 51
+  rope: true
+  heads:
+    skill: categorical
+    action: disc
+
+optim:
+  epochs: 50
+  batch: 8
+  lr: 3.0e-4
+  weight_decay: 1.0e-2
+  grad_clip: 1.0
+  val_frac: 0.1
+
+seed: 0
+device: cuda
+out: runs/smerl_lowalpha_ckpt/bc_phase1_12.pt

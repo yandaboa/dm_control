@@ -1,0 +1,45 @@
+# Phase 1 round 2 (skills 1,2): fixes the round-1 cross-episode failure. Round-1 demos
+# were too SHORT (mean 73 steps ~ 1 sub-ep) so the model was OOD when eval chains 4
+# sub-episodes -> no latching. Round 2 collects ON-POLICY from the round-1 model with
+# LONG expert supervision (drives through 3-4 goal-resets), so demos span the full eval
+# horizon and teach sustained commitment / latch-onto-good across sub-episodes.
+# Adopted arch: RoPE + bs8 + switch_share 0.2.
+data:
+  store:
+    - runs/smerl_lowalpha_ckpt/trajectories_dart12
+    - runs/smerl_lowalpha_ckpt/trajectories_dagger12_meta
+    - runs/smerl_lowalpha_ckpt/trajectories_dagger12_meta_r2
+
+pattern:
+  - [state, skill]
+  - [skill, action]
+  - value
+
+decouple: true
+balance_switch: true
+switch_share: 0.4
+logic: true
+logic_weight: 1.0
+
+model:
+  n_embd: 256
+  n_layer: 6
+  n_head: 4
+  dropout: 0.1
+  n_bins: 51
+  rope: true
+  heads:
+    skill: categorical
+    action: disc
+
+optim:
+  epochs: 50
+  batch: 8
+  lr: 3.0e-4
+  weight_decay: 1.0e-2
+  grad_clip: 1.0
+  val_frac: 0.1
+
+seed: 0
+device: cuda
+out: runs/smerl_lowalpha_ckpt/bc_phase1_12_r2_s40.pt

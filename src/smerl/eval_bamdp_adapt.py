@@ -28,38 +28,30 @@ from src.smerl.skill_decode import load_agent, build_env
 from src.smerl.train_task_value import load_value_net
 from src.smerl.bamdp_env import BAMDPConfig, SyntheticFailureBAMDP
 from src.smerl.collect_trajectories import make_base_env_fn, wrap_value_norm
+from src.smerl.collect_demos import sample_theta
 from src.smerl.eval_bc_multimodal import load_bc
+from src.smerl.adaptive_transformer import AdaptiveTransformer
 
 
 @torch.no_grad()
 def rollout_adapt(model, bamdp, device, sample=False, temperature=1.0, rng=None):
     """Drive the transformer in the BAMDP, switching skills on its own."""
-    sid, zid, vid = model.id_of["state"], model.id_of["skill"], model.id_of["value"]
-    D = model.max_dim
+    at = AdaptiveTransformer(model, device)
     obs = bamdp.reset()
-    ids, vals = [], []
     ret = t = switches = 0
     any_fail = False
     active = None
     terminated = truncated = False
     info = {}
 
-    def fwd():
-        tid = torch.as_tensor(ids, device=device)[None]
-        tval = torch.as_tensor(np.stack(vals), device=device)[None]
-        attn = torch.ones_like(tid, dtype=torch.float32)
-        return model.backbone(model.embed(tid, tval), attn)
-
+    max_ctx = model.cfg.n_positions
     while not (terminated or truncated):
+        if len(at._ids) + 3 > max_ctx:    # context budget: an over-switching model can
+            break                          # run long enough to overflow wpe -> count as no-success
         s = obs["state"].astype(np.float32)
-        sv = np.zeros(D, np.float32); sv[:len(s)] = s
-        ids.append(sid); vals.append(sv)
-        logits = model.head_logits("skill", fwd()[0, -1]).cpu().numpy()
-        if sample:
-            p = np.exp((logits - logits.max()) / temperature); p /= p.sum()
-            z = int((rng or np.random).choice(len(p), p=p))
-        else:
-            z = int(logits.argmax())
+        at.update(s)
+        z = at.sample_skill(rng=((rng or np.random) if sample else None),
+                            temperature=temperature)
         if active is None:
             active = z; bamdp.set_active_skill(z)
         elif z != active:
@@ -69,15 +61,10 @@ def rollout_adapt(model, bamdp, device, sample=False, temperature=1.0, rng=None)
                 # the action must be taken from the fresh retry start: re-observe
                 # and overwrite this step's state token with the teleported state
                 obs = bamdp._observe()
-                s = obs["state"].astype(np.float32)
-                sv = np.zeros(D, np.float32); sv[:len(s)] = s
-                vals[-1] = sv
+                at.revise_state(obs["state"].astype(np.float32))
         v = float(bamdp._v_obs)                  # exposed value under current skill
-        zv = np.zeros(D, np.float32); zv[0] = z
-        ids.append(zid); vals.append(zv)
-        a = torch.clamp(model.head_mean("action", fwd()[0, -1]), -1, 1).cpu().numpy()
-        vv = np.zeros(D, np.float32); vv[0] = v
-        ids.append(vid); vals.append(vv)
+        a = at.sample_action()
+        at.push_value(v)
         obs, r, terminated, truncated, info = bamdp.step(a)
         any_fail = any_fail or bool(info["forced_failure"])
         ret += float(r); t += 1
@@ -107,6 +94,11 @@ def main():
     ap.add_argument("--skills", type=str, default=None,
                     help="restrict the latent to these skills (one made bad/episode)")
     ap.add_argument("--reset-on-switch", action="store_true")
+    ap.add_argument("--theta-mode", choices=["legacy", "train"], default="legacy",
+                    help="legacy (default, back-compat): one bad at --theta-bad, all "
+                         "other skills 0.02; train: sample exactly like collection "
+                         "(sample_theta: forced bad + forced good, rest ~Beta)")
+    ap.add_argument("--good-thr", type=float, default=0.15)
     ap.add_argument("--theta-bad", type=float, default=0.95)
     ap.add_argument("--value-norm-skills", type=str, default=None,
                     help="per-skill renormalize V(s,z)->[0,1] to match training")
@@ -140,9 +132,14 @@ def main():
 
     def set_task(i):
         bamdp.rng = np.random.default_rng(args.seed + i)       # same task per model
-        if allowed is not None:                                # 2-skill: one bad
-            bad = int(bamdp.rng.choice(allowed))
-            theta = np.full(n_skills, 0.02); theta[bad] = args.theta_bad
+        if allowed is not None:
+            if args.theta_mode == "train":                     # match collection latent
+                theta, _, _ = sample_theta(bamdp.rng, n_skills, allowed,
+                                           args.beta_a, args.beta_b,
+                                           args.theta_bad, args.good_thr)
+            else:                                              # legacy: one bad
+                bad = int(bamdp.rng.choice(allowed))
+                theta = np.full(n_skills, 0.02); theta[bad] = args.theta_bad
             bamdp.reset_meta(theta=theta)
         else:
             bamdp.reset_meta()

@@ -1,0 +1,44 @@
+# Phase 2 RETRY with env terminate-on-switch (reset_on_switch=True), skills 0,1,2.
+# Round 3. All switch stores collected with --reset-on-switch (dart012 reused: no
+# switches, dynamics-neutral). share 0.4, RoPE, bs8; epochs 25 (converges well before
+# 50 per phase1_ros). Recipe otherwise mirrors bc_phase2_r3.yaml.
+data:
+  store:
+    - runs/smerl_lowalpha_ckpt/trajectories_dart012
+    - runs/smerl_lowalpha_ckpt/trajectories_dagger012_meta_ros_r1
+    - runs/smerl_lowalpha_ckpt/trajectories_dagger012_meta_ros_r2
+    - runs/smerl_lowalpha_ckpt/trajectories_dagger012_meta_ros_r3
+
+pattern:
+  - [state, skill]
+  - [skill, action]
+  - value
+
+decouple: true
+balance_switch: true
+switch_share: 0.4
+logic: true
+logic_weight: 1.0
+
+model:
+  n_embd: 256
+  n_layer: 6
+  n_head: 4
+  dropout: 0.1
+  n_bins: 51
+  rope: true
+  heads:
+    skill: categorical
+    action: disc
+
+optim:
+  epochs: 25
+  batch: 8
+  lr: 3.0e-4
+  weight_decay: 1.0e-2
+  grad_clip: 1.0
+  val_frac: 0.1
+
+seed: 0
+device: cuda
+out: runs/smerl_lowalpha_ckpt/bc_phase2_ros_r3.pt

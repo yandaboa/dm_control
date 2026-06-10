@@ -26,61 +26,46 @@ from src.smerl.train_task_value import load_value_net
 from src.smerl.bamdp_env import BAMDPConfig, SyntheticFailureBAMDP
 from src.smerl.collect_trajectories import make_base_env_fn
 from src.smerl.eval_bc_multimodal import load_bc
+from src.smerl.adaptive_transformer import AdaptiveTransformer
 
 
 @torch.no_grad()
 def rollout_record(model, bamdp, device, force_first=None):
-    sid, zid, vid = model.id_of["state"], model.id_of["skill"], model.id_of["value"]
-    D = model.max_dim
+    at = AdaptiveTransformer(model, device)
     obs = bamdp.reset()
-    ids, vals = [], []
-    xy, skill, value, failing = [], [], [], []
+    xy, skill, value, failing, teleports, stuck = [], [], [], [], [], []
     active, switches, fail_onset = None, [], None
     terminated = truncated = False
     info = {}
     t = 0
-
-    def fwd():
-        tid = torch.as_tensor(ids, device=device)[None]
-        tval = torch.as_tensor(np.stack(vals), device=device)[None]
-        return model.backbone(model.embed(tid, tval),
-                              torch.ones_like(tid, dtype=torch.float32))
-
-    teleports = []
     while not (terminated or truncated):
         s = obs["state"].astype(np.float32)
-        sv = np.zeros(D, np.float32); sv[:len(s)] = s
-        ids.append(sid); vals.append(sv)
-        z = int(model.head_logits("skill", fwd()[0, -1]).argmax())
+        at.update(s)
+        z = at.sample_skill(force=force_first if active is None else None)
         tele = False
         if active is None:
-            if force_first is not None:          # override the first committed skill
-                z = int(force_first)
             active = z; bamdp.set_active_skill(z)
         elif z != active:
             bamdp.switch_skill(z); switches.append(t); active = z
             if bamdp.cfg.reset_on_switch:        # teleport: act from the fresh start
                 obs = bamdp._observe()
                 s = obs["state"].astype(np.float32)
-                sv = np.zeros(D, np.float32); sv[:len(s)] = s
-                vals[-1] = sv
+                at.revise_state(s)
                 tele = True
         v = float(bamdp._v_obs)
-        zv = np.zeros(D, np.float32); zv[0] = z
-        ids.append(zid); vals.append(zv)
-        a = torch.clamp(model.head_mean("action", fwd()[0, -1]), -1, 1).cpu().numpy()
-        vv = np.zeros(D, np.float32); vv[0] = v
-        ids.append(vid); vals.append(vv)
+        a = at.sample_action()
+        at.push_value(v)
         xy.append(s[:2]); skill.append(active); value.append(v); teleports.append(tele)
         obs, r, terminated, truncated, info = bamdp.step(a)
         failing.append(bool(info["failing"]))
+        stuck.append(bool(info.get("stuck", False)))   # wall envs: contact detection
         if fail_onset is None and info["failing"]:
             fail_onset = t
         t += 1
     return {"xy": np.asarray(xy), "skill": np.asarray(skill),
             "value": np.asarray(value), "failing": np.asarray(failing),
             "switches": switches, "fail_onset": fail_onset,
-            "teleports": np.asarray(teleports),
+            "teleports": np.asarray(teleports), "stuck": np.asarray(stuck),
             "success": bool(info.get("is_success", False)),
             "theta": bamdp.theta.copy()}
 

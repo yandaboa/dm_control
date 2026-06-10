@@ -41,6 +41,7 @@ class GPT2Config:
     n_head: int = 4
     n_positions: int = 1024
     dropout: float = 0.1
+    rope: bool = False        # rotary (relative) positions in attention; disables wpe
 
 
 class CausalSelfAttention(nn.Module):
@@ -52,25 +53,48 @@ class CausalSelfAttention(nn.Module):
         self.proj = nn.Linear(cfg.n_embd, cfg.n_embd)
         self.attn_drop = nn.Dropout(cfg.dropout)
         self.resid_drop = nn.Dropout(cfg.dropout)
+        self.rope = bool(getattr(cfg, "rope", False))
+        if self.rope:
+            from rotary_embedding_torch import RotaryEmbedding
+            d = cfg.n_embd // cfg.n_head
+            assert d % 2 == 0, "RoPE needs an even head dim"
+            self.rotary = RotaryEmbedding(dim=d // 2)   # rotates the full head dim
 
-    def forward(self, x, key_padding_mask=None):
+    def forward(self, x, key_padding_mask=None, past_kv=None, use_cache=False):
+        """past_kv: optional (k, v) [B,h,P,d] from previous steps — x then holds
+        ONLY the new tokens, whose global positions start at P (incremental
+        decode). With use_cache also returns the updated (k, v) including x."""
         B, L, C = x.shape
         q, k, v = self.qkv(x).split(C, dim=2)
         h = self.n_head
         q = q.view(B, L, h, C // h).transpose(1, 2)   # [B,h,L,d]
         k = k.view(B, L, h, C // h).transpose(1, 2)
         v = v.view(B, L, h, C // h).transpose(1, 2)
-        # additive mask: causal + padding, broadcast to [B,h,L,L]
-        mask = torch.zeros(B, 1, L, L, device=x.device, dtype=x.dtype)
-        causal = torch.triu(torch.ones(L, L, device=x.device, dtype=torch.bool), 1)
-        mask = mask.masked_fill(causal, float("-inf"))
-        if key_padding_mask is not None:   # [B,L] True=valid
-            pad = (~key_padding_mask.bool())[:, None, None, :]
-            mask = mask.masked_fill(pad, float("-inf"))
-        att = (q @ k.transpose(-2, -1)) / math.sqrt(C // h) + mask
+        P = past_kv[0].shape[2] if past_kv is not None else 0
+        if self.rope:                                  # rotary (relative) positions
+            q = self.rotary.rotate_queries_or_keys(q, offset=P)
+            k = self.rotary.rotate_queries_or_keys(k, offset=P)
+        if past_kv is not None:
+            k = torch.cat([past_kv[0], k], dim=2)      # [B,h,P+L,d]
+            v = torch.cat([past_kv[1], v], dim=2)
+        T = k.shape[2]
+        att = (q @ k.transpose(-2, -1)) / math.sqrt(C // h)
+        if L > 1 or key_padding_mask is not None:
+            # additive mask: causal + padding, broadcast to [B,h,L,T]; query i sits
+            # at global position P+i and may attend keys j <= P+i. (A single new
+            # token attends the whole prefix — no mask needed.)
+            mask = torch.zeros(B, 1, L, T, device=x.device, dtype=x.dtype)
+            causal = torch.triu(torch.ones(L, T, device=x.device, dtype=torch.bool),
+                                1 + P)
+            mask = mask.masked_fill(causal, float("-inf"))
+            if key_padding_mask is not None:   # [B,T] True=valid
+                pad = (~key_padding_mask.bool())[:, None, None, :]
+                mask = mask.masked_fill(pad, float("-inf"))
+            att = att + mask
         att = self.attn_drop(F.softmax(att, dim=-1))
         y = (att @ v).transpose(1, 2).contiguous().view(B, L, C)
-        return self.resid_drop(self.proj(y))
+        y = self.resid_drop(self.proj(y))
+        return (y, (k, v)) if use_cache else y
 
 
 class Block(nn.Module):
@@ -83,8 +107,13 @@ class Block(nn.Module):
             nn.Linear(cfg.n_embd, 4 * cfg.n_embd), nn.GELU(),
             nn.Linear(4 * cfg.n_embd, cfg.n_embd), nn.Dropout(cfg.dropout))
 
-    def forward(self, x, key_padding_mask=None):
-        x = x + self.attn(self.ln1(x), key_padding_mask)
+    def forward(self, x, key_padding_mask=None, past_kv=None, use_cache=False):
+        if use_cache:
+            a, kv = self.attn(self.ln1(x), key_padding_mask, past_kv, use_cache=True)
+            x = x + a
+            x = x + self.mlp(self.ln2(x))
+            return x, kv
+        x = x + self.attn(self.ln1(x), key_padding_mask, past_kv)
         x = x + self.mlp(self.ln2(x))
         return x
 
@@ -100,13 +129,30 @@ class GPT2Backbone(nn.Module):
         self.blocks = nn.ModuleList([Block(cfg) for _ in range(cfg.n_layer)])
         self.ln_f = nn.LayerNorm(cfg.n_embd)
 
-    def forward(self, inputs_embeds, attention_mask=None):
+    def forward(self, inputs_embeds, attention_mask=None, past_kvs=None,
+                use_cache=False):
+        """past_kvs: optional per-layer [(k, v), ...] — inputs_embeds then holds
+        ONLY the new tokens (positions continue past the cache). With use_cache
+        returns (hidden_of_new_tokens, updated_past_kvs)."""
         B, L, _ = inputs_embeds.shape
-        pos = torch.arange(L, device=inputs_embeds.device)
-        x = self.drop(inputs_embeds + self.wpe(pos)[None, :, :])
-        for blk in self.blocks:
-            x = blk(x, attention_mask)
-        return self.ln_f(x)
+        P = past_kvs[0][0].shape[2] if past_kvs is not None else 0
+        if getattr(self.cfg, "rope", False):           # rotary attention -> no absolute wpe
+            x = self.drop(inputs_embeds)
+        else:
+            pos = torch.arange(P, P + L, device=inputs_embeds.device)
+            x = self.drop(inputs_embeds + self.wpe(pos)[None, :, :])
+        if not use_cache:
+            for i, blk in enumerate(self.blocks):
+                x = blk(x, attention_mask,
+                        past_kvs[i] if past_kvs is not None else None)
+            return self.ln_f(x)
+        new_kvs = []
+        for i, blk in enumerate(self.blocks):
+            x, kv = blk(x, attention_mask,
+                        past_kvs[i] if past_kvs is not None else None,
+                        use_cache=True)
+            new_kvs.append(kv)
+        return self.ln_f(x), new_kvs
 
 
 class TrajectoryGPT(nn.Module):
@@ -258,10 +304,10 @@ class TrajectoryGPT(nn.Module):
             if not sel.any():
                 continue
             if name in self.discrete:
-                out[sel] = self.encoders[name](values[sel][:, 0].long())
+                out[sel] = self.encoders[name](values[sel][:, 0].long()).to(out.dtype)
             else:
                 d = self.dims[name]
-                out[sel] = self.encoders[name](values[sel][:, :d])
+                out[sel] = self.encoders[name](values[sel][:, :d]).to(out.dtype)
         return out + self.type_emb(token_ids)
 
     def _loss_per_pos(self, name, h_sel, tgt_sel):

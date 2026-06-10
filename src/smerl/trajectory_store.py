@@ -60,6 +60,8 @@ class TrajectoryWriter:
             arrs["skills"] = np.asarray(ep["skills"], dtype=np.int64)
         if ep.get("skill_target") is not None:
             arrs["skill_target"] = np.asarray(ep["skill_target"], dtype=np.int64)
+        if ep.get("expert_mask") is not None:
+            arrs["expert_mask"] = np.asarray(ep["expert_mask"], dtype=bool)
         np.savez_compressed(os.path.join(self.out_dir, fname), **arrs)
         self.records.append({
             "file": fname,
@@ -67,6 +69,7 @@ class TrajectoryWriter:
             "z": int(ep["z"]),
             "theta": np.asarray(ep["theta"], dtype=float).tolist(),
             "success": bool(ep["success"]),
+            "n_success": int(ep.get("n_success", 0)),
             "fail_step": (None if ep["fail_step"] is None
                           else int(ep["fail_step"])),
             "fail_mode": ep["fail_mode"],

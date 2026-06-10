@@ -1,0 +1,45 @@
+# Phase 2 ros v3 round 3 — takeover upper bound raised again (5-120, min still 5;
+# max-learner-steps 140 keeps a >=20-step intervention window). r3w store collected
+# by the better round-2 variant (see phase2_ros_r3.sh). Plain concat baseline
+# (cf. bc_phase2_ros_r3w_wt.yaml for recency weighting).
+# RoPE + bs8 + switch_share 0.4, 500 meta-eps/round.
+data:
+  store:
+    - runs/smerl_lowalpha_ckpt/trajectories_dart012
+    - runs/smerl_lowalpha_ckpt/trajectories_dagger012_meta_ros_r1_500
+    - runs/smerl_lowalpha_ckpt/trajectories_dagger012_meta_ros_r2w
+    - runs/smerl_lowalpha_ckpt/trajectories_dagger012_meta_ros_r3w
+
+pattern:
+  - [state, skill]
+  - [skill, action]
+  - value
+
+decouple: true
+balance_switch: true
+switch_share: 0.4
+logic: true
+logic_weight: 1.0
+
+model:
+  n_embd: 256
+  n_layer: 6
+  n_head: 4
+  dropout: 0.1
+  n_bins: 51
+  rope: true
+  heads:
+    skill: categorical
+    action: disc
+
+optim:
+  epochs: 50
+  batch: 8
+  lr: 3.0e-4
+  weight_decay: 1.0e-2
+  grad_clip: 1.0
+  val_frac: 0.1
+
+seed: 0
+device: cuda
+out: runs/smerl_lowalpha_ckpt/bc_phase2_ros_r3w.pt

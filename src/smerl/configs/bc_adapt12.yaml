@@ -1,0 +1,40 @@
+# Phase 0 sanity: skills 1,2 on the existing ON-POLICY stores (dart12 + dagger12,
+# the latter collected on-policy with bc_base_cat12). Identical to the winner
+# bc_logic_dec EXCEPT the switch upweighting is now DATA-DRIVEN (balance_switch) and
+# the logic pos_weight auto-computes (n_neg/n_pos over the decision window).
+data:
+  store:
+    - runs/smerl_lowalpha_ckpt/trajectories_dart12
+    - runs/smerl_lowalpha_ckpt/trajectories_dagger12
+
+pattern:
+  - [state, skill]
+  - [skill, action]
+  - value
+
+decouple: true              # decoupled skill target (z_good leads at the decision step)
+balance_switch: true        # data-driven: decision-window tokens scaled to n_non/n_dec
+logic: true                 # logic gate supervised on EVERY decision-window token
+logic_weight: 1.0
+
+model:
+  n_embd: 256
+  n_layer: 6
+  n_head: 4
+  dropout: 0.1
+  n_bins: 51
+  heads:
+    skill: categorical
+    action: disc
+
+optim:
+  epochs: 50
+  batch: 64
+  lr: 3.0e-4
+  weight_decay: 1.0e-2
+  grad_clip: 1.0
+  val_frac: 0.1
+
+seed: 0
+device: cuda
+out: runs/smerl_lowalpha_ckpt/bc_adapt12.pt

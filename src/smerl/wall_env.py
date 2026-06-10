@@ -18,11 +18,15 @@ from src.smerl.point2d_env import Point2DGoalEnv
 
 
 class WallPoint2DGoalEnv(Point2DGoalEnv):
-    """Point2DGoalEnv + a circular freeze-on-contact wall ``wall=(cx, cy, radius)``."""
+    """Point2DGoalEnv + circular freeze-on-contact wall(s).
+
+    ``wall`` is a single (cx, cy, radius) triple or a list of them — contact with
+    ANY wall freezes the point."""
 
     def __init__(self, *args, wall=None, **kwargs):
         super().__init__(*args, **kwargs)
-        self.wall = None if wall is None else np.asarray(wall, dtype=np.float32)
+        self.wall = (None if wall is None
+                     else np.atleast_2d(np.asarray(wall, dtype=np.float32)))
         self._stuck = False
 
     def reset(self, *, seed=None, options=None):
@@ -42,9 +46,10 @@ class WallPoint2DGoalEnv(Point2DGoalEnv):
                     new_pos[i] = -self.world_half_extent; self._vel[i] = 0.0
                 elif new_pos[i] > self.world_half_extent:
                     new_pos[i] = self.world_half_extent; self._vel[i] = 0.0
-            if self.wall is not None:             # circular wall: freeze on contact
-                cx, cy, rho = self.wall
-                if (new_pos[0] - cx) ** 2 + (new_pos[1] - cy) ** 2 <= rho * rho:
+            if self.wall is not None:             # circular wall(s): freeze on contact
+                d2 = ((new_pos[0] - self.wall[:, 0]) ** 2
+                      + (new_pos[1] - self.wall[:, 1]) ** 2)
+                if bool(np.any(d2 <= self.wall[:, 2] ** 2)):
                     self._stuck = True
                     self._vel[:] = 0.0
             self._pos = new_pos
@@ -103,6 +108,45 @@ def valid_walls(agent, env_fn, z_block, z_spare, rng, radii=(0.05, 0.06, 0.07, 0
         blk_goal = rollout_path(agent, env_fn(wall), z_block)[1]
         spr_goal = rollout_path(agent, env_fn(wall), z_spare)[1]
         if (not blk_goal) and spr_goal:
+            valid.append(wall)
+            if len(valid) >= cap:
+                break
+    return valid
+
+
+def unique_walls(agent, env_fn, z_block, z_spares, rng,
+                 radii=(0.05, 0.06, 0.07, 0.08), spare_margin=0.02, cap=80,
+                 jitter=True):
+    """Walls on the part of z_block's path UNIQUE to it: candidate centers are
+    z_block path points ordered by clearance to ALL of z_spares' paths (most
+    separated first), so the wall sits where only z_block travels — not on the
+    shared trunk near the start. Each candidate must geometrically spare every
+    path in z_spares; each is then verified to stick z_block while sparing all
+    z_spares. ``jitter`` shuffles within the top-separation half so repeated
+    calls don't return near-identical centers."""
+    A = rollout_path(agent, env_fn(None), z_block)[0][:, :2]
+    Bs = [rollout_path(agent, env_fn(None), z)[0][:, :2] for z in z_spares]
+    n = len(A)
+    lo, hi = int(0.15 * n), int(0.85 * n)
+    sep = np.min(np.stack([np.min(np.linalg.norm(A[:, None, :] - B[None, :, :],
+                                                 axis=-1), axis=1)
+                           for B in Bs]), axis=0)          # clearance to NEAREST other path
+    order = [i for i in np.argsort(-sep) if lo <= i < hi]
+    if jitter and len(order) > 4:
+        top = order[:max(4, len(order) // 2)]
+        rng.shuffle(top)
+        order = top + order[len(top):]
+    cands = []
+    for idx in order:
+        cx, cy = A[idx]
+        for rho in radii:
+            if rho + spare_margin < sep[idx]:     # wall can't touch ANY spared path
+                cands.append((float(cx), float(cy), float(rho)))
+    valid = []
+    for wall in cands:
+        if rollout_path(agent, env_fn(wall), z_block)[1]:
+            continue                              # must stick z_block
+        if all(rollout_path(agent, env_fn(wall), z)[1] for z in z_spares):
             valid.append(wall)
             if len(valid) >= cap:
                 break

@@ -1,0 +1,5 @@
+[bs16] train done: [done] best val=1.21041  saved src/smerl/runs/smerl_lowalpha_ckpt/bc_phase2_ros_r1_bs16.pt
+[bs64] train done: [done] best val=1.55836  saved src/smerl/runs/smerl_lowalpha_ckpt/bc_phase2_ros_r1_bs64.pt
+[bs32] train done: [done] best val=1.33310  saved src/smerl/runs/smerl_lowalpha_ckpt/bc_phase2_ros_r1_bs32.pt
+[bs16] evals done
+[bs64] evals done

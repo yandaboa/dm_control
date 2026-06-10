@@ -39,46 +39,22 @@ from src.smerl.collect_trajectories import (make_base_env_fn,
                                             estimate_action_magnitude,
                                             wrap_value_norm)
 from src.smerl.eval_bc_multimodal import load_bc
-
-
-@torch.no_grad()
-def sample_skill(model, s, device, rng, temperature=1.0):
-    """Sample a skill from the transformer's skill head at state s (single token)."""
-    sid = model.id_of["state"]
-    sv = np.zeros(model.max_dim, np.float32)
-    sv[:len(s)] = s
-    tid = torch.tensor([[sid]], device=device)
-    tval = torch.as_tensor(sv[None, None], device=device)
-    attn = torch.ones_like(tid, dtype=torch.float32)
-    hidden = model.backbone(model.embed(tid, tval), attn)
-    logits = model.head_logits("skill", hidden[0, -1]).cpu().numpy()
-    p = np.exp((logits - logits.max()) / temperature)
-    p /= p.sum()
-    return int(rng.choice(len(p), p=p))
-
-
-def pick_good_skill(theta, z0, rng):
-    """Sample z_good from the top-2 success rates (1-theta), != z0."""
-    succ = 1.0 - np.asarray(theta)
-    top2 = np.argsort(succ)[-2:]                 # two highest-success skills
-    w = succ[top2] / max(succ[top2].sum(), 1e-12)
-    z_good = int(rng.choice(top2, p=w))
-    if z_good == z0:                             # ensure a real switch
-        other = [int(z) for z in top2 if int(z) != z0]
-        if other:
-            z_good = other[0]
-    return z_good
+from src.smerl.adaptive_transformer import AdaptiveTransformer
 
 
 def collect_dagger_episode(bamdp, agent, model, z_good, action_noise, device,
                            rng, k_min, k_max, obs_delay=2):
-    """One on-policy intervention rollout. Returns the episode dict (with a
-    per-step ``skills`` array) and whether it was kept (intervened + success)."""
+    """One on-policy intervention rollout. Returns (episode dict with a per-step
+    ``skills`` array, kept flag). Returns (None, False) when the policy already
+    starts on the good skill — there is no genuinely-good skill to switch TO, so
+    the attempt cannot produce a switch demo."""
     obs = bamdp.reset()
     s0 = obs["state"]
-    z0 = sample_skill(model, s0, device, rng)
-    if z_good == z0:                             # re-pick a good skill != z0
-        z_good = pick_good_skill(bamdp.theta, z0, rng)
+    at = AdaptiveTransformer(model, device)
+    at.update(s0)
+    z0 = at.sample_skill(rng=rng)
+    if z0 == z_good:
+        return None, False
     bamdp.set_active_skill(z0)
     obs = bamdp._observe()
 
@@ -262,7 +238,7 @@ def main():
             kept += 1
             switch_to[ep["z_good"]] += 1
             pbar.update(1)
-        elif not ep["intervened"]:
+        elif ep is None or not ep["intervened"]:   # started on the good skill, or never failed
             n_no_interv += 1
         else:
             n_interv_fail += 1

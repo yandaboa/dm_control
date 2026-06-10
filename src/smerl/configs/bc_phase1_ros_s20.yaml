@@ -1,0 +1,44 @@
+# Phase 1 RETRY with env-side terminate-on-switch (reset_on_switch=True): a skill
+# switch teleports to a fresh start (give up & retry) instead of continuing in
+# place. Collection mirrors phase1_r2 (on-policy from bc_phase1_12, LONG supervision
+# 150,300, max-learner-steps 120) but with --reset-on-switch, 800 eps. Trains on
+# dart12 + the PURE ros meta store (old non-teleport meta stores excluded so the
+# post-switch dynamics are consistent). switch_share sweep 0.2-0.5; this is 0.20.
+data:
+  store:
+    - runs/smerl_lowalpha_ckpt/trajectories_dart12
+    - runs/smerl_lowalpha_ckpt/trajectories_dagger12_meta_ros
+
+pattern:
+  - [state, skill]
+  - [skill, action]
+  - value
+
+decouple: true
+balance_switch: true
+switch_share: 0.20
+logic: true
+logic_weight: 1.0
+
+model:
+  n_embd: 256
+  n_layer: 6
+  n_head: 4
+  dropout: 0.1
+  n_bins: 51
+  rope: true
+  heads:
+    skill: categorical
+    action: disc
+
+optim:
+  epochs: 50
+  batch: 8
+  lr: 3.0e-4
+  weight_decay: 1.0e-2
+  grad_clip: 1.0
+  val_frac: 0.1
+
+seed: 0
+device: cuda
+out: runs/smerl_lowalpha_ckpt/bc_phase1_ros_s20.pt

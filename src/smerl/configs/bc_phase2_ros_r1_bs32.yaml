@@ -1,0 +1,45 @@
+# (v2: 500 meta-eps/round — 1000 at 50 epochs doubled gradient steps and overfit r1)
+# Phase 2 RETRY round 1 (skills 0,1,2) with env terminate-on-switch
+# (reset_on_switch=True). 1000 meta-eps/round, all intervened + >=1 post-intervention
+# success. r1 driver = bc_phase2_r0.pt (takeover 5-15); r2 driver = bc_phase2_ros_r1.pt
+# with takeover 70-85 (learner self-generates 1-2 sub-eps of history before the expert
+# may correct -> corrections target the cross-episode latching region). PURE ros meta
+# stores (old non-teleport stores excluded). RoPE + bs8 + switch_share 0.4.
+data:
+  store:
+    - runs/smerl_lowalpha_ckpt/trajectories_dart012
+    - runs/smerl_lowalpha_ckpt/trajectories_dagger012_meta_ros_r1_500
+
+pattern:
+  - [state, skill]
+  - [skill, action]
+  - value
+
+decouple: true
+balance_switch: true
+switch_share: 0.4
+logic: true
+logic_weight: 1.0
+
+model:
+  n_embd: 256
+  n_layer: 6
+  n_head: 4
+  dropout: 0.1
+  n_bins: 51
+  rope: true
+  heads:
+    skill: categorical
+    action: disc
+
+optim:
+  epochs: 50
+  batch: 32
+  lr: 3.0e-4
+  weight_decay: 1.0e-2
+  grad_clip: 1.0
+  val_frac: 0.1
+
+seed: 0
+device: cuda
+out: runs/smerl_lowalpha_ckpt/bc_phase2_ros_r1_bs32.pt
